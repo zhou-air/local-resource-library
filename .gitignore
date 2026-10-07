@@ -1,8 +1,8 @@
 # Build output
 **/bin/
 **/obj/
-dist/
-artifacts/
+/dist/*
+/artifacts/*
 TestResults/
 
 # Local editor state

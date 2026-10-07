@@ -1,4 +1,4 @@
-using LocalResourceLibrary.App.Localization;
+using LocalResourceLibrary.WinUI.Localization;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;

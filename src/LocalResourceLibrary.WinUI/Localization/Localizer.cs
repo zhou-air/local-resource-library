@@ -1,6 +1,6 @@
 using System.ComponentModel;
 
-namespace LocalResourceLibrary.App.Localization;
+namespace LocalResourceLibrary.WinUI.Localization;
 
 public sealed class Localizer(string language) : INotifyPropertyChanged
 {

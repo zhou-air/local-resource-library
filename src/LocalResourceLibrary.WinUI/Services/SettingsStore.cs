@@ -1,7 +1,7 @@
 using System.IO;
 using System.Text.Json;
 
-namespace LocalResourceLibrary.App.Services;
+namespace LocalResourceLibrary.WinUI.Services;
 
 public sealed class SettingsStore
 {

@@ -1,82 +1,80 @@
-# WinUI 3 外观试用版
+# WinUI 3 使用说明
 
 日期：2026-10-07
 
-本版用于比较 Windows 原生界面的形状、材质、动画和主要操作。它是独立的 WinUI 3 前端，复用原资源库核心与数据；现有 WPF 前端继续保留。[WinUI 3 是 Windows App SDK 提供的原生桌面 UI 框架](https://learn.microsoft.com/en-us/windows/apps/winui/winui3/)。
+本项目现仅保留 WinUI 3 桌面界面，使用 SQLite 核心登记本地文件和文件夹。添加资源只保存路径引用，不复制、移动或保存文件内容。[WinUI 3](https://learn.microsoft.com/en-us/windows/apps/winui/winui3/) 是 Windows App SDK 提供的原生桌面 UI 框架。
 
 ## 启动与数据
 
-解压完整运行包，先退出已打开的 WPF 资源库，再运行解压目录中的 `LocalResourceLibrary.WinUI.exe`。两个前端使用同一把资源库互斥锁，不能同时打开同一个数据目录。
+完整解压运行包后，运行 `LocalResourceLibrary.WinUI.exe`。默认数据目录为 `%LOCALAPPDATA%\LocalResourceLibrary`，保存 `library.db`、语言设置 `settings.json` 和浏览布局设置 `explorer-settings.json`。同一数据目录不能被两个应用实例同时打开。
 
-默认复用 `%LOCALAPPDATA%\LocalResourceLibrary` 中的 `library.db` 与 `settings.json`。在 WinUI 版保存的别名、说明、笔记、项目关系或新增资源，之后会在 WPF 版中显示。添加资源仍然只保存文件和文件夹引用。
-
-需要指定其他资源库时，可在 EXE 所在目录打开 PowerShell，使用 `--data-dir`：
+在 EXE 所在目录的 PowerShell 中，可指定其他资源库：
 
 ```powershell
 & .\LocalResourceLibrary.WinUI.exe --data-dir "D:\MyResourceLibrary"
 ```
 
-发布包采用自包含的完整目录形式。分发、移动或解压时请保留整个目录，不要只复制 EXE；相关依赖随程序一并提供。[Microsoft 自包含部署说明](https://learn.microsoft.com/en-us/windows/apps/package-and-deploy/self-contained-deploy/deploy-self-contained-apps)介绍了这种部署方式。
+运行包采用自包含的完整目录形式，包含 .NET 和 Windows App SDK 运行依赖。请保留整个目录，不要只复制 EXE。发布方式见 [Microsoft 自包含部署说明](https://learn.microsoft.com/en-us/windows/apps/package-and-deploy/self-contained-deploy/deploy-self-contained-apps)。
 
-## 本轮可试用的操作
+备份或恢复前请完全退出应用，再复制整个数据目录。资源本体需另行备份。删除程序文件夹不会自动删除资源库。
 
-- 搜索；全部资源、最近打开、路径失效及项目筛选；选择资源查看详情。
-- 编辑别名、说明和笔记，保存或放弃修改；选择多个所属项目；新建项目。
+## 资源操作
+
+- 通过文件或文件夹选择器、拖放添加资源；同一路径复用现有记录。
+- 搜索别名、真实文件名、路径、说明、笔记及项目名称；按全部资源、最近打开、路径失效或项目筛选。
+- 编辑别名、说明和笔记，保存或放弃修改。别名不会改变磁盘上的名称。
+- 新建逻辑项目，为资源勾选多个所属项目，或取消勾选后保存以移出项目。
 - 刷新资源状态；打开资源、打开所在位置、复制路径。
-- 通过文件/文件夹选择器或拖放添加资源。
-- 切换中文与英文；切换资源、筛选或关闭时处理未保存修改。
+- 切换中文与英文；切换资源、分类或关闭时处理未保存修改。
 
-本轮范围尚未包括真实文件重命名、修复路径、编辑或删除项目、从库中移除资源，以及原版完整右键菜单。需要这些操作时，可退出试用版后使用 WPF 版。
+项目是逻辑集合，不是磁盘文件夹。添加文件夹不会自动导入其全部内容。多词搜索要求每个词都匹配某个可搜索字段；要搜索整个库，请先选「全部资源」。
 
-## 外观与主题
+当前界面尚未提供真实文件重命名、路径修复、项目编辑/删除、从库移除资源以及完整右键菜单。Core 中保留相关接口，尚未接入界面。外部移动或改名会使旧路径失效，应用不会自动寻找新位置。
 
-资源区默认采用「详细信息」视图，显示名称、原文件修改日期、类型和大小。通过工具栏「查看」可切换超大图标、大图标、中等图标、小图标、列表、详细信息、平铺和内容；图标取自 Windows 的文件类型关联与文件夹图标。
+## 查看、排序与布局
 
-「排序」提供名称、修改日期、类型、大小和上次打开，以及递增、递减和文件夹优先。详细信息表头也可点击排序，再次点击反转顺序。名称使用 Windows 自然排序，例如文件 2 排在文件 10 前面。
+资源区默认采用「详细信息」，显示名称、修改日期、类型和大小。工具栏「查看」还可切换超大图标、大图标、中等图标、小图标、列表、平铺和内容；图标取自 Windows 文件类型关联及文件夹图标。
 
-未选中资源时，右侧详情不占用空间。选中资源后自动展开，点击文件区空白、按 Esc 或切换左侧分类后收起；有未保存修改时仍会提示保存、放弃或取消。详情右上角可关闭面板，工具栏「详细信息」可为当前选中资源重新打开。切换视图、排序或调整宽度保留当前选择与未保存内容。
+「排序」支持名称、修改日期、类型、大小、上次打开，以及递增、递减和文件夹优先。详细信息表头也可点击排序，再次点击反转顺序。名称使用 Windows 自然排序，例如文件 2 排在文件 10 前面。
 
-拖动左右两条分隔线调整三栏宽度；分隔线获得键盘焦点后也可用左右方向键调整。中间栏随左右栏宽度和窗口大小变化。查看方式、排序选项和左右栏宽度保存在数据目录内的 `explorer-settings.json` 中，下次启动恢复；启动时不恢复资源选择，详情保持收起。
+未选中资源时，右侧详情不占用空间。选中后自动展开；点击资源区空白、按 `Esc` 或切换分类后清除选择并收起。有未保存修改时会提示保存、放弃或取消。详情右上角可关闭面板，工具栏「详细信息」可为当前资源重新打开。切换视图、排序或调整宽度保留当前选择与未保存内容。
 
-界面使用原生 ListView、GridView、输入框、按钮、菜单和 ContentDialog，保留 Windows 控件的焦点、按压及弹出动画。窗口配置 Mica 背景，内容以清晰的分区和克制的圆角呈现。
+拖动两条分隔线调整三栏宽度；分隔线获得键盘焦点后也可用左右方向键调整。查看方式、排序和左右栏宽保存在 `explorer-settings.json` 中。下次启动恢复这些设置，但不恢复资源选择，详情保持收起。
 
-主题自动跟随 Windows 的深浅色设置。本轮尚未加入应用内主题切换或自定义颜色设置。Mica 的实际效果受 Windows 版本、透明度、高对比度和节电状态影响；系统会在不适用时使用纯色背景。[Microsoft Mica 材质说明](https://learn.microsoft.com/en-us/windows/apps/design/style/mica)。
+快捷键：`Ctrl+F` 搜索，`Ctrl+S` 保存详情，`F5` 刷新状态；资源列表中的 `Enter` 打开资源，`F2` 编辑别名。
 
-## 保留的原版本
+## 主题
 
-项目中的原 WPF 源码位于 `src/LocalResourceLibrary.App`，本轮不修改该前端。项目本机保留的发布快照位于 `dist/WPF-preserved-20261007`，包含：
+界面使用原生 ListView、GridView、输入框、按钮、菜单和 ContentDialog，保留 Windows 控件的焦点、按压及弹出动画。窗口配置 Mica 背景。
 
-- `LocalResourceLibrary-win-x64` 完整运行目录。
-- `LocalResourceLibrary-win-x64.zip` 原运行包。
-- `LocalResourceLibrary-v0.1-source.zip` 原源码包。
+主题跟随 Windows 深浅色设置，尚无应用内主题切换或自定义颜色。Mica 效果受 Windows 版本、透明度、高对比度和节电状态影响；不适用时由系统提供纯色背景。见 [Microsoft Mica 材质说明](https://learn.microsoft.com/en-us/windows/apps/design/style/mica)。
 
-保留版本指界面源码与发布文件；两个前端默认使用同一个资源库数据目录。
+## 开发与打包
 
-## 开发与验证
+源码位于 `src/LocalResourceLibrary.WinUI`，核心位于 `src/LocalResourceLibrary.Core`。在 Windows 安装 .NET 10 SDK 后，从源码根目录构建；Windows SDK 构建工具通过 NuGet 还原。
 
-新前端源码位于 `src/LocalResourceLibrary.WinUI`。以下命令在 Windows 上、源码项目根目录的 PowerShell 中执行。安装 .NET 10 SDK 后构建独立解决方案；本项目使用的 Windows SDK 构建工具通过 NuGet 还原：
-
-源码建议解压到 `C:\Dev\LocalResourceLibrary-WinUI-trial-source` 等较短目录。本机复验中，过深目录使 XAML 编译的中间程序集路径达到 263 字符并构建失败；同一源码移到短目录后正常构建。现成运行包不需要编译。
+请将源码放在 `C:\Dev\LocalResourceLibrary-WinUI-trial-source` 等较短目录。历史本机检查中，过深目录使 XAML 中间路径达到 263 字符并构建失败；缩短目录后构建通过。现成运行包不需要编译。
 
 ```powershell
 dotnet build .\LocalResourceLibrary.WinUI.slnx -c Release -p:Platform=x64
+dotnet run --project tests/LocalResourceLibrary.Checks
+dotnet run --project tests/LocalResourceLibrary.ExplorerChecks
 ```
 
-发布完整运行目录并生成 ZIP：
+发布完整运行目录和 ZIP：
 
 ```powershell
 & .\scripts\publish-winui.ps1 -Zip
 ```
 
-输出为 `dist/LocalResourceLibrary-WinUI-win-x64` 完整目录及同名 ZIP；脚本同时附带使用文档和依赖许可说明。
+输出为 `dist/LocalResourceLibrary-WinUI-win-x64` 及同名 ZIP，附带使用文档和实际依赖的许可通知。已有输出保留为 `.previous-winui-…`。
 
-生成可编辑源码包：
+生成源码包：
 
 ```powershell
 & .\scripts\package-winui-source.ps1
 ```
 
-输出为 `dist/LocalResourceLibrary-WinUI-trial-source.zip`，包含两个前端、核心代码、开发脚本及文档；不包含发布程序或资源库数据。
+输出为 `dist/LocalResourceLibrary-WinUI-trial-source.zip`，包含 WinUI、Core、两组检查、开发脚本和文档；不包含另一套桌面前端、发布程序或资源库数据。文件名保留原源码包名称，不代表提供其他前端。
 
-本版定位为外观与主要交互试用版，功能范围以上述清单为准。具体构建、启动、视觉与交互验证结果，以及验证边界，记录在随运行包分发的 `docs/winui-verification.md`；源码文档目录中的文件名为 `winui-verification.md`。
-
+实际核验结果与未覆盖范围见 [核验记录](winui-verification.md)。项目原创源码采用 GPL-3.0-only，见 [LICENSE](../LICENSE)；依赖说明见 [WinUI 依赖许可](winui-third-party-notices.md)。

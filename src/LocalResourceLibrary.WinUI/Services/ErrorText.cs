@@ -1,6 +1,6 @@
-using LocalResourceLibrary.App.Localization;
+using LocalResourceLibrary.WinUI.Localization;
 
-namespace LocalResourceLibrary.App.Services;
+namespace LocalResourceLibrary.WinUI.Services;
 
 /// <summary>Translates application-owned errors without altering paths or operating-system details.</summary>
 public static class ErrorText

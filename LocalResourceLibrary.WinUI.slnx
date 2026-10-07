@@ -6,4 +6,8 @@
     <Project Path="src/LocalResourceLibrary.WinUI/LocalResourceLibrary.WinUI.csproj" />
     <Project Path="src/LocalResourceLibrary.Core/LocalResourceLibrary.Core.csproj" />
   </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/LocalResourceLibrary.Checks/LocalResourceLibrary.Checks.csproj" />
+    <Project Path="tests/LocalResourceLibrary.ExplorerChecks/LocalResourceLibrary.ExplorerChecks.csproj" />
+  </Folder>
 </Solution>

@@ -1,5 +1,5 @@
-using LocalResourceLibrary.App.Localization;
-using LocalResourceLibrary.App.Services;
+using LocalResourceLibrary.WinUI.Localization;
+using LocalResourceLibrary.WinUI.Services;
 using LocalResourceLibrary.Core;
 using LocalResourceLibrary.WinUI.ViewModels;
 using Microsoft.UI;

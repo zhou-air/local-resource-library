@@ -40,12 +40,12 @@ function Get-SourceFiles {
         }
         if ($entry.Extension.ToLowerInvariant() -notin $Extensions) { continue }
         if ($entry.Name -match '(?i)(^|[._-])(settings|appsettings|credentials|secrets)([._-]|$)') { continue }
-        if ($entry.Name -match '(?i)\.(user|suo|db|sqlite|sqlite3|log|dmp)([.-]|$)') { continue }
+        if ($entry.Name -match '(?i)\.(user|suo|db|sqlite|sqlite3|log|dmp)(?:-(shm|wal|journal))?$') { continue }
         $entry.FullName
     }
 }
 
-if (-not (Test-Path -LiteralPath (Join-Path $repositoryRoot 'LocalResourceLibrary.slnx') -PathType Leaf)) {
+if (-not (Test-Path -LiteralPath (Join-Path $repositoryRoot 'LocalResourceLibrary.WinUI.slnx') -PathType Leaf)) {
     throw 'Run this script from its original scripts directory inside the source repository.'
 }
 
@@ -58,7 +58,7 @@ Assert-DistPath -Path $temporaryArchive
 
 $sourcePaths = [System.Collections.Generic.List[string]]::new()
 $rootFiles = @(
-    'README.md', 'README.en.md', 'THIRD-PARTY-NOTICES.md', 'LocalResourceLibrary.slnx', 'LocalResourceLibrary.WinUI.slnx',
+    'README.md', 'README.en.md', 'THIRD-PARTY-NOTICES.md', 'LocalResourceLibrary.WinUI.slnx',
     '.gitignore', '.gitattributes', '.editorconfig', 'global.json', 'NuGet.config',
     'Directory.Build.props', 'Directory.Build.targets', 'Directory.Packages.props',
     'LICENSE', 'LICENSE.md', 'LICENSE.txt'
@@ -94,7 +94,7 @@ foreach ($rule in $folderRules) {
     $fullPath.Substring($repositoryPrefix.Length)
 })
 [Array]::Sort($relativePaths, [System.StringComparer]::Ordinal)
-foreach ($requiredPath in @('LocalResourceLibrary.slnx', 'LocalResourceLibrary.WinUI.slnx', 'src\LocalResourceLibrary.WinUI\LocalResourceLibrary.WinUI.csproj', 'src\LocalResourceLibrary.App\LocalResourceLibrary.App.csproj', 'src\LocalResourceLibrary.Core\LocalResourceLibrary.Core.csproj')) {
+foreach ($requiredPath in @('LocalResourceLibrary.WinUI.slnx', 'src\LocalResourceLibrary.WinUI\LocalResourceLibrary.WinUI.csproj', 'src\LocalResourceLibrary.WinUI\Localization\Localizer.cs', 'src\LocalResourceLibrary.WinUI\Services\SettingsStore.cs', 'src\LocalResourceLibrary.WinUI\Services\ErrorText.cs', 'src\LocalResourceLibrary.Core\LocalResourceLibrary.Core.csproj')) {
     if ($requiredPath -notin $relativePaths) { throw "Required source file is missing: $requiredPath" }
 }
 

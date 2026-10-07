@@ -1,4 +1,4 @@
-using LocalResourceLibrary.App.Localization;
+using LocalResourceLibrary.WinUI.Localization;
 using LocalResourceLibrary.Core;
 using LocalResourceLibrary.WinUI.ViewModels;
 using Microsoft.UI.Xaml;

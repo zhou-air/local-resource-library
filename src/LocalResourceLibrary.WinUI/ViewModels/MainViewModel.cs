@@ -2,7 +2,7 @@ using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
-using LocalResourceLibrary.App.Localization;
+using LocalResourceLibrary.WinUI.Localization;
 using LocalResourceLibrary.Core;
 using LocalResourceLibrary.WinUI.Services;
 using Microsoft.UI.Xaml;

@@ -26,9 +26,4 @@
     <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.26100.9169" />
     <ProjectReference Include="..\LocalResourceLibrary.Core\LocalResourceLibrary.Core.csproj" />
   </ItemGroup>
-  <ItemGroup>
-    <Compile Include="..\LocalResourceLibrary.App\Localization\Localizer.cs" Link="Localization\Localizer.cs" />
-    <Compile Include="..\LocalResourceLibrary.App\Services\SettingsStore.cs" Link="Services\SettingsStore.cs" />
-    <Compile Include="..\LocalResourceLibrary.App\Services\ErrorText.cs" Link="Services\ErrorText.cs" />
-  </ItemGroup>
 </Project>

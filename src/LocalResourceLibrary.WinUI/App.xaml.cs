@@ -2,8 +2,8 @@ using System.IO;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
-using LocalResourceLibrary.App.Localization;
-using LocalResourceLibrary.App.Services;
+using LocalResourceLibrary.WinUI.Localization;
+using LocalResourceLibrary.WinUI.Services;
 using LocalResourceLibrary.Core;
 using Microsoft.UI.Xaml;
 
@@ -27,8 +27,8 @@ public partial class App : Application
             var dataDirectory = GetDataDirectory(Environment.GetCommandLineArgs().Skip(1).ToArray());
             Directory.CreateDirectory(dataDirectory);
 
-            // Share the established WPF lock, including its exact path normalization,
-            // so both frontends cannot write to the same library at the same time.
+            // Keep the established path normalization and per-library lock identity
+            // so multiple instances cannot write to the same library at the same time.
             var key = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(
                 Path.GetFullPath(dataDirectory).TrimEnd('\\').ToUpperInvariant())));
             _mutex = new Mutex(true, "Local\\LocalResourceLibrary-" + key, out _ownsMutex);

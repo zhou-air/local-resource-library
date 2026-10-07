@@ -2,34 +2,29 @@
 
 [简体中文](README.md)
 
-A lightweight Windows desktop library that gives local files and folders readable names, descriptions, notes, and project membership.
+A Windows local resource library built with WinUI 3. Add aliases, descriptions, notes, and project memberships to files and folders, with local search, eight view modes, natural sorting, and Chinese/English UI.
 
-**Resources stay where they are.** Adding a resource stores its absolute path. It does not copy or move the resource or store its contents. One resource can belong to several logical projects, all referencing the same item.
+**Resources stay where they are.** Adding a resource stores its absolute path without copying, moving, or storing its contents. One resource can belong to several logical projects, all referencing the same item. WinUI 3 is the project's only desktop frontend.
 
-## Two desktop interfaces
-
-The project includes a WPF version and a WinUI 3 trial frontend sharing the same SQLite core. The V0.1 feature list and default run/build commands below describe the WPF version.
-
-The WinUI 3 frontend adds native Windows controls, file association icons, eight view modes, natural sorting, and adjustable panes. Some resource-management operations still require WPF. Both frontends use the same data directory by default and cannot open the same library simultaneously. See the [WinUI 3 trial guide (Chinese)](docs/winui-trial.md) for its feature scope and build commands, and the [WinUI verification record (Chinese)](docs/winui-verification.md) for checked coverage.
-
-## V0.1 features
+## Available features
 
 - Add files and folders with pickers or drag and drop. An already registered path reuses its existing item.
-- Keep alias, description, and note separate. The alias is the preferred display name.
-- Create logical projects and assign an item to multiple projects.
+- Keep alias, description, and note separate. The alias is the preferred display name and does not change the actual file name.
+- Create logical projects and select or clear memberships in the details panel. An item can belong to multiple projects.
 - Search aliases, real file names, paths, descriptions, notes, and project names using local text search.
-- Double-click to open files with their Windows default application, or folders with Explorer. Track open count and last-opened time.
-- Open the containing location, copy a path, remove project membership, or remove a library record.
-- Rename a physical file or folder through a separate operation while retaining the item ID, metadata, and project relationships.
-- Mark missing paths without deleting their records, and repair paths later.
-- Store metadata locally in SQLite and switch between Chinese and English UI.
+- Filter by all resources, recently opened resources, missing paths, or projects.
+- Double-click to open resources; open the containing location or copy a path. Track open count and last-opened time.
+- Show Windows file association icons in extra large, large, medium, small, list, details, tiles, and content views.
+- Sort by name, date modified, type, size, or last opened, with ascending/descending order and folders first. Names use Windows natural sorting.
+- Resize navigation and details panes. Save view, sorting, pane widths, and language locally.
+- Store metadata in SQLite and handle unsaved edits with Save, Discard, and Cancel choices.
 
 ## Run
 
-Use a 64-bit Windows 10 or Windows 11 desktop environment. Published releases include the required .NET runtime.
+Use a 64-bit Windows 10 or Windows 11 desktop environment. Published releases include the required .NET and Windows App SDK runtime dependencies.
 
 1. Extract the complete release folder and keep all its files together.
-2. Open `LocalResourceLibrary.exe`.
+2. Open `LocalResourceLibrary.WinUI.exe`.
 3. Add files or folders, describe them, and assign them to projects.
 
 No account is required. The app provides no cloud sync, telemetry, or background network service. External applications used to open resources may have their own network behavior.
@@ -38,25 +33,24 @@ No account is required. The app provides no cloud sync, telemetry, or background
 
 | Goal | Action |
 | --- | --- |
-| Give an item a readable name | Edit its alias; the real file name stays the same |
+| Give an item a readable name | Edit its alias; the actual file name stays the same |
 | Explain what a resource contains and why it matters | Edit its description |
 | Save temporary or personal information | Edit its note |
-| Reuse a resource across projects | Select multiple memberships in the details panel |
-| Open a resource | Double-click it or choose Open in its context menu |
+| Add or remove project membership | Select or clear memberships in details, then save |
+| Open a resource | Double-click it or choose Open in details |
 | Locate it in Explorer | Choose Open location |
-| Change its actual name | Use Rename physical file / folder and confirm |
-| Restore a moved resource reference | Select the missing item and repair its path |
-| Remove one membership | Choose Remove from project |
-| Forget a resource in this app | Choose Remove from library; the physical resource remains |
-| Switch language | Use the language selector at the top of the window; the choice is saved |
+| Get its saved path | Choose Copy path |
+| Check resource availability | Choose Refresh status |
+| Change view or sorting | Use View or Sort; details headers also support sorting |
+| Switch language | Use the language selector at the top; the choice is saved |
 
-A project is a logical collection, not a disk folder. Deleting a project or a library record never deletes the physical resource. Editing an alias and renaming a physical file are separate operations.
+Click Save after editing details. Selecting another resource or category, or closing the window, prompts you to save, discard, or cancel when changes remain. Search applies within the current sidebar category. Each whitespace-separated term must match at least one searchable field of the resource; choose All resources to search the whole library.
 
-Click Save after editing details. Selecting another item or closing the window prompts you to save, discard, or cancel if changes remain. Search applies within the current sidebar view. Multiple whitespace-separated terms must each match at least one searchable field of the resource; choose All resources to search the whole library.
+Adding a folder registers the folder itself, without importing its contents. Use Refresh status after externally moving a resource or disconnecting/reconnecting a location. Missing resources retain their records and descriptions.
 
-Use Refresh status after externally moving a resource or disconnecting/reconnecting a location. Adding a folder registers the folder itself; it does not import all its contents. Renaming a folder in the app also updates already registered child paths.
+Selecting a resource opens details. Clicking blank resource-area space, pressing `Esc`, or changing sidebar category clears selection and collapses details. The Details toolbar button opens or closes details for the current selection. Drag pane dividers to resize them; focused dividers also accept the left and right arrow keys.
 
-Keyboard shortcuts: `Ctrl+F` focuses search, `Ctrl+S` saves details, and `F5` refreshes status. When focus is in the resource list, `Enter` opens the selected resource and `F2` edits its alias.
+Keyboard shortcuts: `Ctrl+F` focuses search, `Ctrl+S` saves details, and `F5` refreshes status. In the resource list, `Enter` opens the selected resource and `F2` edits its alias.
 
 ## Data and backup
 
@@ -66,60 +60,57 @@ The default database is:
 %LOCALAPPDATA%\LocalResourceLibrary\library.db
 ```
 
-The database contains metadata, projects, and memberships. It does not contain the resources themselves; backing up the library is not a backup of the original files.
+The database contains metadata, projects, and memberships, not the resources themselves. Backing up the library is not a backup of the original files. Language is stored in `settings.json`; view, sorting, and pane widths are stored in `explorer-settings.json` in the same directory. Only one app instance can open a data directory at a time.
 
-The interface language is saved in `settings.json` in the same directory. Only one app instance can open the same data directory at a time.
+**Fully exit the app before copying the entire `LocalResourceLibrary` data directory for backup.** Exit before restoring it, too. Moving the library to another computer requires making the resources available at their saved paths; the current UI does not offer path repair.
 
-**Fully exit the app before copying the entire `LocalResourceLibrary` data directory for backup.** Exit the app before restoring it, too. Moving the library to another computer also requires making the original resources available there and repairing changed paths.
-
-Use a separate data directory for a trial run or verification:
+Use a separate data directory:
 
 ```powershell
-.\LocalResourceLibrary.exe --data-dir "C:\Temp\LocalResourceLibrary-Test"
+.\LocalResourceLibrary.WinUI.exe --data-dir "C:\Temp\LocalResourceLibrary-Test"
 ```
 
-Removing the program folder does not automatically remove the library stored in the local application data directory.
+Removing the program folder does not automatically remove the library stored in local application data.
 
 ## Build from source
 
-Requires Windows and the [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0). Initial restore, build, or publish may need network access to download NuGet dependencies and runtime packs.
+Requires Windows and the [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0). Initial restore, build, or publish may require network access for NuGet dependencies and runtime packs. Windows SDK build tools are restored through NuGet. `global.json` selects a stable .NET 10 SDK and allows newer feature bands within that major version.
+
+Keep the source in a short path such as `C:\Dev`; deep directories can exceed WinUI XAML intermediate-path limits.
 
 ```powershell
-dotnet build LocalResourceLibrary.slnx
+dotnet build .\LocalResourceLibrary.WinUI.slnx -c Release -p:Platform=x64
 dotnet run --project tests/LocalResourceLibrary.Checks
-dotnet run --project tests/LocalResourceLibrary.UiChecks
-dotnet run --project src/LocalResourceLibrary.App
+dotnet run --project tests/LocalResourceLibrary.ExplorerChecks
 ```
 
-UI integration checks require an available Windows desktop session. `global.json` selects a stable .NET 10 SDK and allows newer feature bands within that major version.
+These executable checks cover core behavior and the resource-browsing model. They do not establish complete UI or visual coverage.
 
 Publish a self-contained Windows x64 release:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\publish.ps1 -Zip
+powershell -ExecutionPolicy Bypass -File .\scripts\publish-winui.ps1 -Zip
 ```
 
-The output folder is `dist/LocalResourceLibrary-win-x64`; the optional archive is `dist/LocalResourceLibrary-win-x64.zip`. Distribute the complete folder or archive. The script publishes into a fresh staging directory first. When a successful build replaces an existing output, the previous folder is retained under `dist` as `.previous-…`; remove it manually when no longer needed.
+The output is `dist/LocalResourceLibrary-WinUI-win-x64` and an optional archive with the same name plus `.zip`. Distribute the complete folder or archive. Existing output is retained under `dist` as `.previous-winui-…` after a successful replacement.
 
 Package the source without requiring Git:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\package-source.ps1
+powershell -ExecutionPolicy Bypass -File .\scripts\package-winui-source.ps1
 ```
 
-The output is `dist/LocalResourceLibrary-v0.1-source.zip`, with a containing top-level folder. The script selects source code, project configuration, documentation, and scripts from an explicit allowlist, excluding build caches, databases, user settings, and logs. Archive entries have a stable order and timestamps. An existing source archive is retained as `.previous-source-…`.
+The output is `dist/LocalResourceLibrary-WinUI-trial-source.zip`, with a containing top-level folder, WinUI frontend, Core, checks, configuration, documentation, and development scripts. The script excludes build caches, databases, user settings, and logs. Archive entries have a stable order and timestamps. An existing source archive is retained as `.previous-winui-source-…`.
 
-See [architecture](docs/architecture.md), [UI design](docs/ui-design.md), the [verification record](docs/verification.md), the [release verification checklist](docs/release-checklist.md), and [third-party notices](THIRD-PARTY-NOTICES.md).
+See the [usage guide (Chinese)](docs/winui-trial.md), [architecture](docs/architecture.md), [verification record (Chinese)](docs/winui-verification.md), [release checklist](docs/release-checklist.md), and [third-party notices](THIRD-PARTY-NOTICES.md).
 
 ## Scope and limitations
 
-V0.1 registers local files and folders using their saved paths. If another application moves or renames a resource, repair its path. The app does not scan the computer to guess its new location.
+The current WinUI frontend does not offer physical-file rename, path repair, project editing/deletion, library-record removal, or a complete context menu. The related data and file-operation interfaces remain in Core but are not exposed by the UI. If another program moves or renames a resource, the saved path becomes invalid; the app does not scan the computer to guess its new location.
 
-Search uses only library metadata, with no file-content indexing, AI, or embeddings. URL collection, previews, tags, global hotkey search, cloud sync, accounts, browser extensions, automatic classification, and network services are not implemented. The generic item model and separate search interface leave room for later work.
+Search uses library metadata only, without content indexing, AI, or embeddings. URL collection, content previews, tags, global hotkey search, cloud sync, accounts, browser extensions, automatic classification, and network services are not implemented. The app is intended for one local user and offers no shared-database or cross-device collaboration.
 
-This version is intended for one local user. It does not provide shared-database or cross-device collaboration. Physical-file rename changes the disk resource; resolve file locks, existing destination names, or permission problems before retrying.
-
-Application instructions and errors are available in Chinese and English. Low-level errors returned by Windows may use the operating system's language.
+The theme follows Windows light/dark settings, with no in-app theme switch. Mica availability depends on the operating system and settings. Application instructions and errors are available in Chinese and English; low-level Windows errors may use the operating system's language.
 
 ## License
 
