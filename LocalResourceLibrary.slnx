@@ -1,0 +1,10 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/LocalResourceLibrary.App/LocalResourceLibrary.App.csproj" />
+    <Project Path="src/LocalResourceLibrary.Core/LocalResourceLibrary.Core.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/LocalResourceLibrary.Checks/LocalResourceLibrary.Checks.csproj" />
+    <Project Path="tests/LocalResourceLibrary.UiChecks/LocalResourceLibrary.UiChecks.csproj" />
+  </Folder>
+</Solution>

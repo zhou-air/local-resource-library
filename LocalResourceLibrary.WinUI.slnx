@@ -1,0 +1,9 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+  </Configurations>
+  <Folder Name="/src/">
+    <Project Path="src/LocalResourceLibrary.WinUI/LocalResourceLibrary.WinUI.csproj" />
+    <Project Path="src/LocalResourceLibrary.Core/LocalResourceLibrary.Core.csproj" />
+  </Folder>
+</Solution>

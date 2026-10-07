@@ -1,0 +1,34 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
+    <TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>
+    <UseWinUI>true</UseWinUI>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <AssemblyName>LocalResourceLibrary.WinUI</AssemblyName>
+    <RootNamespace>LocalResourceLibrary.WinUI</RootNamespace>
+    <Version>0.1.0</Version>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <Platforms>x64</Platforms>
+    <PlatformTarget>x64</PlatformTarget>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <WindowsPackageType>None</WindowsPackageType>
+    <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
+    <SelfContained>true</SelfContained>
+    <PublishSingleFile>false</PublishSingleFile>
+    <PublishTrimmed>false</PublishTrimmed>
+    <EnableMsixTooling>true</EnableMsixTooling>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.5.1" />
+    <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.26100.9169" />
+    <ProjectReference Include="..\LocalResourceLibrary.Core\LocalResourceLibrary.Core.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Include="..\LocalResourceLibrary.App\Localization\Localizer.cs" Link="Localization\Localizer.cs" />
+    <Compile Include="..\LocalResourceLibrary.App\Services\SettingsStore.cs" Link="Services\SettingsStore.cs" />
+    <Compile Include="..\LocalResourceLibrary.App\Services\ErrorText.cs" Link="Services\ErrorText.cs" />
+  </ItemGroup>
+</Project>

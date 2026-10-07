@@ -1,0 +1,111 @@
+using System.ComponentModel;
+
+namespace LocalResourceLibrary.App.Localization;
+
+public sealed class Localizer(string language) : INotifyPropertyChanged
+{
+    public event PropertyChangedEventHandler? PropertyChanged;
+    public string Language { get; private set; } = language;
+    public bool IsEnglish => Language == "en";
+    public string this[string key] => Strings.TryGetValue(key, out var pair) ? (IsEnglish ? pair.En : pair.Zh) : key;
+    public void ChangeLanguage(string language)
+    {
+        Language = language;
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs("Item[]"));
+    }
+    public string Format(string key, params object[] values) => string.Format(this[key], values);
+    private static readonly Dictionary<string, (string Zh, string En)> Strings = new()
+    {
+        ["Title"] = ("本地资源库", "Local Resource Library"),
+        ["Subtitle"] = ("文件留在原处，线索整理在这里。", "Keep your files in place. Keep their context here."),
+        ["Search"] = ("搜索别名、文件名、路径、说明、笔记或项目", "Search aliases, names, paths, descriptions, notes or projects"),
+        ["Add"] = ("＋ 添加资源", "+ Add resources"),
+        ["AddFile"] = ("添加文件…", "Add files…"),
+        ["AddFolder"] = ("添加文件夹…", "Add folder…"),
+        ["Refresh"] = ("刷新状态", "Refresh status"),
+        ["All"] = ("全部资源", "All resources"),
+        ["Recent"] = ("最近打开", "Recently opened"),
+        ["Missing"] = ("路径失效", "Missing"),
+        ["Available"] = ("可用", "Available"),
+        ["Projects"] = ("项目", "Projects"),
+        ["NewProject"] = ("＋ 新建项目", "+ New project"),
+        ["EditProject"] = ("编辑项目…", "Edit project…"),
+        ["DeleteProject"] = ("删除项目…", "Delete project…"),
+        ["ProjectName"] = ("项目名称", "Project name"),
+        ["ProjectDescription"] = ("项目说明", "Project description"),
+        ["Resources"] = ("资源", "Resources"),
+        ["Resource"] = ("名称 / 说明", "Name / description"),
+        ["Type"] = ("类型", "Type"),
+        ["File"] = ("文件", "File"),
+        ["Folder"] = ("文件夹", "Folder"),
+        ["Path"] = ("完整路径", "Full path"),
+        ["State"] = ("状态", "Status"),
+        ["Details"] = ("资源详情", "Resource details"),
+        ["Alias"] = ("别名", "Alias"),
+        ["AliasHelp"] = ("只改变库内显示名称，不重命名原文件。", "Changes the display name only; the original name stays the same."),
+        ["Description"] = ("说明", "Description"),
+        ["DescriptionHelp"] = ("它是什么？有什么用？什么时候会用到？", "What is it, why is it useful, and when will you need it?"),
+        ["Note"] = ("笔记", "Note"),
+        ["Membership"] = ("所属项目（可多选）", "Projects (select multiple)"),
+        ["Save"] = ("保存", "Save"),
+        ["Cancel"] = ("取消", "Cancel"),
+        ["Discard"] = ("放弃修改", "Discard changes"),
+        ["Saved"] = ("已保存", "Saved"),
+        ["Unsaved"] = ("有未保存的修改", "Unsaved changes"),
+        ["RealName"] = ("真实名称", "Original name"),
+        ["Created"] = ("添加时间", "Added"),
+        ["Updated"] = ("更新时间", "Updated"),
+        ["LastOpened"] = ("上次打开", "Last opened"),
+        ["OpenCount"] = ("打开次数", "Open count"),
+        ["Never"] = ("尚未打开", "Never opened"),
+        ["NoProjects"] = ("尚无项目；可以先在左侧新建。", "No projects yet. Create one in the sidebar."),
+        ["Unassigned"] = ("未归入项目", "No project"),
+        ["Open"] = ("打开", "Open"),
+        ["OpenLocation"] = ("打开所在位置", "Open location"),
+        ["CopyPath"] = ("复制路径", "Copy path"),
+        ["EditAlias"] = ("编辑别名", "Edit alias"),
+        ["EditDescription"] = ("编辑说明", "Edit description"),
+        ["EditNote"] = ("编辑笔记", "Edit note"),
+        ["AddToProject"] = ("添加到项目…", "Add to project…"),
+        ["RemoveFromProject"] = ("从项目移除…", "Remove from project…"),
+        ["RemoveLibrary"] = ("从资源库移除…", "Remove from library…"),
+        ["RenamePhysical"] = ("重命名真实文件 / 文件夹…", "Rename physical file / folder…"),
+        ["LibraryOperations"] = ("资源库操作 · 不改动原文件", "Library operations · originals stay in place"),
+        ["FileOperations"] = ("真实文件操作", "Physical file operations"),
+        ["Repair"] = ("修复路径…", "Repair path…"),
+        ["MissingHelp"] = ("找不到此路径，或暂时无法访问。信息已保留，可选择新的位置修复。", "This path is missing or temporarily unavailable. Its context is preserved; select a new location to repair it."),
+        ["EmptyTitle"] = ("把常用资源放到一起", "Bring your resources together"),
+        ["EmptyHelp"] = ("拖入文件或文件夹，或点击“添加资源”。\n这里只记录引用，不会复制或移动原文件。", "Drop files or folders here, or use Add resources.\nOnly references are stored; originals are not copied or moved."),
+        ["NoResults"] = ("没有匹配的资源", "No matching resources"),
+        ["NoResultsHelp"] = ("试试其他关键词、清空搜索，或切换项目。", "Try another term, clear the search, or switch projects."),
+        ["ChooseItem"] = ("选择一个资源查看详情", "Select a resource to see its details"),
+        ["ChooseHelp"] = ("可编辑别名、说明、笔记和项目归属。", "Edit its alias, description, note and projects."),
+        ["DropHint"] = ("支持拖入文件和文件夹 · 双击打开", "Drop files and folders · Double-click to open"),
+        ["Ready"] = ("就绪", "Ready"),
+        ["Working"] = ("正在处理…", "Working…"),
+        ["Count"] = ("{0} 个资源", "{0} resources"),
+        ["AddResult"] = ("新增 {0} 个，复用已有资源 {1} 个。", "Added {0}; reused {1} existing resources."),
+        ["AddErrors"] = ("部分资源未能添加", "Some resources could not be added"),
+        ["Error"] = ("操作未完成", "Operation could not be completed"),
+        ["ErrorHelp"] = ("请检查路径、文件占用情况和访问权限。\n\n详细信息：", "Check the path, file locks and access permissions.\n\nDetails: "),
+        ["SavePrompt"] = ("当前资源有未保存的修改。\n\n是：保存并继续\n否：放弃修改并继续\n取消：留在当前资源", "This resource has unsaved changes.\n\nYes: save and continue\nNo: discard and continue\nCancel: stay on this resource"),
+        ["RemovePrompt"] = ("将“{0}”从资源库及所有项目中移除？\n\n原文件或文件夹会保留。", "Remove “{0}” from the library and all projects?\n\nThe original file or folder will remain."),
+        ["DeleteProjectPrompt"] = ("删除项目“{0}”？\n\n资源仍保留在资源库，原文件不受影响。", "Delete project “{0}”?\n\nResources remain in the library; original files are unaffected."),
+        ["RenameTitle"] = ("重命名真实文件 / 文件夹", "Rename physical file / folder"),
+        ["RenameHelp"] = ("这会修改磁盘上的真实名称。请输入名称，不要输入路径；文件需保留正确的扩展名。别名、说明、笔记和项目关系会保留。", "This changes the actual name on disk. Enter a name, not a path; keep the correct file extension. Alias, description, note and projects are preserved."),
+        ["NewName"] = ("新的真实名称", "New physical name"),
+        ["Rename"] = ("确认重命名", "Rename on disk"),
+        ["ChooseProject"] = ("选择项目", "Choose project"),
+        ["NothingToRemove"] = ("该资源尚未加入任何项目。", "This resource does not belong to a project yet."),
+        ["NoProjectToAdd"] = ("请先新建项目，或该资源已属于所有项目。", "Create a project first, or this resource already belongs to every project."),
+        ["Confirm"] = ("确定", "OK"),
+        ["Copied"] = ("路径已复制", "Path copied"),
+        ["Database"] = ("数据库位置", "Database location"),
+        ["Language"] = ("界面语言", "Interface language"),
+        ["LocalStorage"] = ("数据保存在本机", "Stored on this computer"),
+        ["ResizePane"] = ("拖动调整区域宽度", "Drag to resize the pane"),
+        ["ClearSearch"] = ("清空搜索", "Clear search"),
+        ["RefreshDone"] = ("资源状态已刷新", "Resource status refreshed"),
+        ["BusyClose"] = ("操作正在进行，请完成后再关闭。", "An operation is in progress. Please close after it finishes.")
+    };
+}

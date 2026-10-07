@@ -1,0 +1,36 @@
+# Build output
+**/bin/
+**/obj/
+dist/
+artifacts/
+TestResults/
+
+# Local editor state
+.vs/
+.idea/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# Local resource-library data must never enter a source release
+*.db
+*.db-shm
+*.db-wal
+*.db-journal
+settings.json
+settings.json.tmp
+explorer-settings.json
+explorer-settings.json.tmp
+
+# Local credentials
+.env
+.env.*
+!.env.example
+*.pfx
+*.p12
+*.key
+
+# Local crash dumps and logs
+*.dmp
+*.log
