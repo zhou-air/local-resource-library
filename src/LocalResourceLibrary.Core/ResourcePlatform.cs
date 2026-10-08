@@ -19,6 +19,7 @@ public sealed class WindowsResourcePlatform : IResourcePlatform
     public void Open(string path, string type)
     {
         RequireWindows();
+        if (type == ResourceUrls.Type) ResourceUrls.Normalize(path);
         if (type == "folder")
         {
             StartExplorer(path, selectFile: false);
@@ -30,6 +31,7 @@ public sealed class WindowsResourcePlatform : IResourcePlatform
     public void OpenLocation(string path, string type)
     {
         RequireWindows();
+        if (type == ResourceUrls.Type) throw new NotSupportedException("网址没有本地文件位置。");
         StartExplorer(path, selectFile: type == "file");
     }
 

@@ -9,8 +9,11 @@
     <Compile Include="../../src/LocalResourceLibrary.WinUI/Services/SettingsStore.cs" Link="SettingsStore.cs" />
     <Compile Include="../../src/LocalResourceLibrary.WinUI/ViewModels/MainViewModel.cs" Link="MainViewModel.cs" />
     <Compile Include="../../src/LocalResourceLibrary.WinUI/Services/ExplorerPreferences.cs" Link="ExplorerPreferences.cs" />
+    <Compile Include="../../src/LocalResourceLibrary.WinUI/Services/ResourceEditDraft.cs" Link="ResourceEditDraft.cs" />
     <Compile Include="../../src/LocalResourceLibrary.Core/Models.cs" Link="Models.cs" />
+    <Compile Include="../../src/LocalResourceLibrary.Core/ResourceMutations.cs" Link="ResourceMutations.cs" />
     <Compile Include="../../src/LocalResourceLibrary.Core/FileIdentity.cs" Link="FileIdentity.cs" />
+    <Compile Include="../../src/LocalResourceLibrary.Core/ResourceUrls.cs" Link="ResourceUrls.cs" />
     <Compile Include="../../src/LocalResourceLibrary.Core/Search.cs" Link="Search.cs" />
     <Compile Include="../../src/LocalResourceLibrary.WinUI/Localization/Localizer.cs" Link="Localizer.cs" />
   </ItemGroup>

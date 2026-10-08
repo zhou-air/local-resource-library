@@ -45,13 +45,41 @@ public sealed class LibraryService
         }
     }
 
+    /// <summary>Get the current context, optionally recovering a saved file identity without opening its contents.</summary>
+    public ResourceItem GetResource(string id, bool resolvePath = true)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(id);
+        lock (gate)
+        {
+            using var connection = repository.Connect();
+            using var transaction = connection.BeginTransaction(deferred: !resolvePath);
+            var item = RequireItem(connection, transaction, id);
+            item = resolvePath ? ResolveResourceTarget(connection, transaction, item, throwIfMissing: false)
+                : item with { IsMissing = !Exists(item.Target, item.Type) };
+            transaction.Commit();
+            return item;
+        }
+    }
+
+    /// <summary>Register one target atomically; existing records retain metadata and only gain requested memberships.</summary>
+    public AddResourceResult AddResource(string type, string target, string? alias = null, string? description = null,
+        string? note = null, IEnumerable<string>? projectIds = null)
+    {
+        if (type is not ("file" or "folder" or ResourceUrls.Type))
+            throw new ArgumentException("资源类型必须为 file、folder 或 url。", nameof(type));
+        return RegisterResource(type, target, alias, description, note, projectIds ?? []);
+    }
+
     public AddResourcesResult AddPaths(IEnumerable<string> paths, string? projectId = null)
     {
         ArgumentNullException.ThrowIfNull(paths);
         lock (gate)
         {
-            using var connection = repository.Connect();
-            if (projectId != null) RequireProject(connection, null, projectId);
+            if (projectId != null)
+            {
+                using var connection = repository.Connect();
+                RequireProject(connection, null, projectId);
+            }
             var added = 0;
             var existing = 0;
             var errors = new List<string>();
@@ -59,33 +87,8 @@ public sealed class LibraryService
             {
                 try
                 {
-                    var target = ResourcePaths.Normalize(rawPath);
-                    var key = ResourcePaths.Key(target);
-                    using var transaction = connection.BeginTransaction();
-                    var itemId = Scalar(connection, transaction, "SELECT id FROM Item WHERE path_key=$key;", ("$key", key)) as string;
-                    var isNew = itemId == null;
-                    if (isNew)
-                    {
-                        var type = platform.DirectoryExists(target) ? "folder" : platform.FileExists(target) ? "file" : null;
-                        if (type == null) throw new FileNotFoundException("路径不存在或暂时无法访问。", target);
-                        itemId = Guid.NewGuid().ToString("N");
-                        var now = Time(DateTimeOffset.UtcNow);
-                        var identity = type == "file" ? CaptureIdentity(target) : null;
-                        Execute(connection, transaction,
-                            "INSERT INTO Item(id,type,target,path_key,created_at,updated_at,volume_id,file_id) VALUES($id,$type,$target,$key,$now,$now,$volume,$file);",
-                            ("$id", itemId), ("$type", type), ("$target", target), ("$key", key), ("$now", now),
-                            ("$volume", identity?.VolumeId), ("$file", identity?.FileId));
-                    }
-                    else BackfillIdentity(connection, transaction, RequireItem(connection, transaction, itemId!));
-                    if (projectId != null)
-                    {
-                        RequireProject(connection, transaction, projectId);
-                        var changed = Execute(connection, transaction, "INSERT OR IGNORE INTO ProjectItem(project_id,item_id) VALUES($project,$item);",
-                            ("$project", projectId), ("$item", itemId));
-                        if (changed > 0 && !isNew) Touch(connection, transaction, itemId!);
-                    }
-                    transaction.Commit();
-                    if (isNew) added++; else existing++;
+                    var result = RegisterResource(null, rawPath, null, null, null, projectId == null ? [] : [projectId]);
+                    if (result.Added) added++; else existing++;
                 }
                 catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or
                                                   ArgumentException or NotSupportedException or SqliteException or InvalidOperationException)
@@ -95,6 +98,91 @@ public sealed class LibraryService
             }
             return new AddResourcesResult(added, existing, errors);
         }
+    }
+
+    /// <summary>Collect an exact URL once, or add memberships without overwriting the existing context.</summary>
+    public AddUrlResult AddUrl(string url, string alias, string description, string note,
+        IEnumerable<string> projectIds, byte[]? favicon = null)
+    {
+        ArgumentNullException.ThrowIfNull(projectIds);
+        var result = RegisterResource(ResourceUrls.Type, url, alias, description, note, projectIds, favicon);
+        return new AddUrlResult(result.Item, result.Added);
+    }
+
+    private AddResourceResult RegisterResource(string? requestedType, string rawTarget, string? alias, string? description,
+        string? note, IEnumerable<string> projectIds, byte[]? favicon = null)
+    {
+        var target = requestedType == ResourceUrls.Type ? ResourceUrls.Normalize(rawTarget) : ResourcePaths.Normalize(rawTarget);
+        var key = requestedType == ResourceUrls.Type ? ResourceUrls.Key(target) : ResourcePaths.Key(target);
+        var ids = projectIds.Distinct(StringComparer.Ordinal).ToArray();
+        var icon = ResourceUrls.CopyFavicon(favicon);
+        lock (gate)
+        {
+            using var connection = repository.Connect();
+            using var transaction = connection.BeginTransaction();
+            foreach (var projectId in ids) RequireProject(connection, transaction, projectId);
+            var itemId = Scalar(connection, transaction, "SELECT id FROM Item WHERE path_key=$key;", ("$key", key)) as string;
+            var added = itemId == null;
+            if (added)
+            {
+                var type = requestedType ?? (platform.DirectoryExists(target) ? "folder" : platform.FileExists(target) ? "file" : null);
+                if (type == null || !Exists(target, type))
+                    throw new FileNotFoundException("路径不存在、暂时无法访问，或资源类型与路径不同。", target);
+                itemId = Guid.NewGuid().ToString("N");
+                var now = Time(DateTimeOffset.UtcNow);
+                var identity = type == "file" ? CaptureIdentity(target) : null;
+                Execute(connection, transaction, """
+                    INSERT INTO Item(id,type,target,path_key,alias,description,note,created_at,updated_at,volume_id,file_id,favicon)
+                    VALUES($id,$type,$target,$key,$alias,$description,$note,$now,$now,$volume,$file,$icon);
+                    """, ("$id", itemId), ("$type", type), ("$target", target), ("$key", key),
+                    ("$alias", alias ?? ""), ("$description", description ?? ""), ("$note", note ?? ""),
+                    ("$now", now), ("$volume", identity?.VolumeId), ("$file", identity?.FileId), ("$icon", icon));
+            }
+            else
+            {
+                var existing = RequireItem(connection, transaction, itemId!);
+                if (requestedType != null && existing.Type != requestedType)
+                    throw new InvalidOperationException("相同路径已收藏为其他资源类型，请使用现有记录。");
+                if (Exists(existing.Target, existing.Type)) BackfillIdentity(connection, transaction, existing);
+            }
+            var changed = 0;
+            foreach (var projectId in ids)
+                changed += Execute(connection, transaction, "INSERT OR IGNORE INTO ProjectItem(project_id,item_id) VALUES($project,$item);",
+                    ("$project", projectId), ("$item", itemId));
+            if (!added && changed > 0) Touch(connection, transaction, itemId!);
+            var item = RequireItem(connection, transaction, itemId!);
+            item = item with { IsMissing = !Exists(item.Target, item.Type) };
+            transaction.Commit();
+            return new AddResourceResult(item, added);
+        }
+    }
+
+    /// <summary>Update the URL and its context atomically. A changed target drops an old icon unless one is supplied.</summary>
+    public void UpdateUrl(string id, string url, string alias, string description, string note,
+        IEnumerable<string> projectIds, byte[]? favicon = null)
+    {
+        var target = ResourceUrls.Normalize(url);
+        var key = ResourceUrls.Key(target);
+        ArgumentNullException.ThrowIfNull(projectIds);
+        var ids = projectIds.Distinct(StringComparer.Ordinal).ToArray();
+        var icon = ResourceUrls.CopyFavicon(favicon);
+        Write((connection, transaction) =>
+        {
+            var item = RequireItem(connection, transaction, id);
+            if (!item.IsUrl) throw new NotSupportedException("此操作仅适用于网址资源。");
+            foreach (var projectId in ids) RequireProject(connection, transaction, projectId);
+            var otherId = Scalar(connection, transaction, "SELECT id FROM Item WHERE path_key=$key AND id<>$id;", ("$key", key), ("$id", id)) as string;
+            if (otherId != null) throw new InvalidOperationException("资源库中已存在完全相同的网址，请使用现有记录。");
+            Execute(connection, transaction, """
+                UPDATE Item SET target=$target,path_key=$key,alias=$alias,description=$description,note=$note,
+                    favicon=CASE WHEN $icon IS NOT NULL THEN $icon WHEN target=$target THEN favicon ELSE NULL END,
+                    updated_at=$now WHERE id=$id;
+                """, ("$target", target), ("$key", key), ("$alias", alias ?? ""), ("$description", description ?? ""),
+                ("$note", note ?? ""), ("$icon", icon), ("$now", Time(DateTimeOffset.UtcNow)), ("$id", id));
+            Execute(connection, transaction, "DELETE FROM ProjectItem WHERE item_id=$id;", ("$id", id));
+            foreach (var projectId in ids)
+                Execute(connection, transaction, "INSERT INTO ProjectItem(project_id,item_id) VALUES($project,$item);", ("$project", projectId), ("$item", id));
+        });
     }
 
     public void UpdateItem(string id, string alias, string description, string note, IEnumerable<string> projectIds)
@@ -113,6 +201,188 @@ public sealed class LibraryService
         });
     }
 
+    public ResourceItem PatchResourceMetadata(ResourceMetadataPatch patch)
+    {
+        ArgumentNullException.ThrowIfNull(patch);
+        ArgumentException.ThrowIfNullOrWhiteSpace(patch.Id);
+        ResourceItem result = null!;
+        Write((connection, transaction) =>
+        {
+            var item = RequireItem(connection, transaction, patch.Id);
+            ApplyMetadataPatch(connection, transaction, item, patch);
+            result = RequireItem(connection, transaction, patch.Id);
+        });
+        return result with { IsMissing = !Exists(result.Target, result.Type) };
+    }
+
+    /// <summary>Add/remove only the specified memberships; unrelated projects stay intact.</summary>
+    public ResourceItem ChangeResourceProjects(string id, IEnumerable<string>? addProjectIds = null,
+        IEnumerable<string>? removeProjectIds = null)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(id);
+        var (add, remove) = MembershipDelta(addProjectIds, removeProjectIds);
+        ResourceItem result = null!;
+        Write((connection, transaction) =>
+        {
+            RequireItem(connection, transaction, id);
+            ApplyMembershipDelta(connection, transaction, id, add, remove);
+            result = RequireItem(connection, transaction, id);
+        });
+        return result with { IsMissing = !Exists(result.Target, result.Type) };
+    }
+
+    /// <summary>Commit a previously reviewed batch only if every resource still matches its expected context.</summary>
+    public ResourceMetadataBatchResult ApplyResourceMetadataBatch(IEnumerable<ResourceMetadataPatch> patches,
+        IEnumerable<ResourceItem> expectedItems)
+    {
+        ArgumentNullException.ThrowIfNull(patches);
+        ArgumentNullException.ThrowIfNull(expectedItems);
+        var changes = patches.ToArray();
+        var expected = expectedItems.ToArray();
+        lock (gate)
+        {
+            try
+            {
+                using var connection = repository.Connect();
+                using var transaction = connection.BeginTransaction();
+                var failures = new List<ResourceMetadataFailure>();
+                var originals = new Dictionary<string, ResourceItem>(StringComparer.Ordinal);
+                var seen = new HashSet<string>(StringComparer.Ordinal);
+                foreach (var patch in changes)
+                {
+                    if (patch == null || string.IsNullOrWhiteSpace(patch.Id))
+                    {
+                        failures.Add(new ResourceMetadataFailure(patch?.Id ?? "", "资源 ID 不能为空。"));
+                        continue;
+                    }
+                    if (!seen.Add(patch.Id))
+                    {
+                        failures.Add(new ResourceMetadataFailure(patch.Id, "同一批次不能重复修改同一资源。"));
+                        continue;
+                    }
+                    var candidates = expected.Where(item => item.Id == patch.Id).ToArray();
+                    if (candidates.Length != 1)
+                    {
+                        failures.Add(new ResourceMetadataFailure(patch.Id, "此资源必须提供唯一的预览快照。"));
+                        continue;
+                    }
+                    var item = ReadItem(connection, transaction, patch.Id);
+                    if (item == null)
+                        failures.Add(new ResourceMetadataFailure(patch.Id, "资源记录不存在。"));
+                    else if (!SameResourceContext(item, candidates[0]))
+                        failures.Add(new ResourceMetadataFailure(patch.Id, "资源在预览后已发生变化，请重新预览。"));
+                    else originals.Add(patch.Id, item);
+                }
+                if (failures.Count > 0) return new ResourceMetadataBatchResult(false, [], failures);
+                foreach (var patch in changes) ApplyMetadataPatch(connection, transaction, originals[patch.Id], patch);
+                var items = changes.Select(patch =>
+                {
+                    var item = RequireItem(connection, transaction, patch.Id);
+                    return item with { IsMissing = !Exists(item.Target, item.Type) };
+                }).ToArray();
+                transaction.Commit();
+                return new ResourceMetadataBatchResult(true, items, []);
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or SqliteException)
+            {
+                // Transaction disposal rolls back every write, including an error during commit.
+                return new ResourceMetadataBatchResult(false, [], changes.Select(patch =>
+                    new ResourceMetadataFailure(patch.Id, $"批量写入失败，全部变更已回滚：{exception.Message}")).ToArray());
+            }
+        }
+    }
+
+    /// <summary>Save only edited UI fields; conflict checks and membership changes use the same transaction.</summary>
+    public ResourceItem ApplyResourceEdit(ResourceItem expected, ResourceMetadataPatch patch,
+        IEnumerable<string> addProjectIds, IEnumerable<string> removeProjectIds, string? url = null, byte[]? favicon = null)
+    {
+        ArgumentNullException.ThrowIfNull(expected);
+        ArgumentNullException.ThrowIfNull(patch);
+        if (patch.Id != expected.Id) throw new ArgumentException("资源补丁与编辑快照的 ID 不一致。", nameof(patch));
+        var (add, remove) = MembershipDelta(addProjectIds, removeProjectIds);
+        var target = url == null ? null : ResourceUrls.Normalize(url);
+        var icon = ResourceUrls.CopyFavicon(favicon);
+        ResourceItem result = null!;
+        Write((connection, transaction) =>
+        {
+            var current = RequireItem(connection, transaction, expected.Id);
+            if ((patch.Alias != null && current.Alias != expected.Alias) ||
+                (patch.Description != null && current.Description != expected.Description) ||
+                (patch.Note != null && current.Note != expected.Note) ||
+                (target != null && current.Target != expected.Target) ||
+                (icon != null && !SameBytes(current.Favicon, expected.Favicon)))
+                throw new InvalidOperationException("资源已被其他进程修改，请保留当前草稿，刷新后重新编辑。");
+            if (target != null || icon != null)
+            {
+                if (!current.IsUrl) throw new NotSupportedException("网址和网站图标只能用于 URL 资源。");
+                var newTarget = target ?? current.Target;
+                var key = ResourceUrls.Key(newTarget);
+                if (Scalar(connection, transaction, "SELECT id FROM Item WHERE path_key=$key AND id<>$id;",
+                        ("$key", key), ("$id", current.Id)) is string)
+                    throw new InvalidOperationException("资源库中已存在完全相同的网址，请使用现有记录。");
+                if (newTarget != current.Target || icon != null)
+                    Execute(connection, transaction, """
+                        UPDATE Item SET target=$target,path_key=$key,
+                            favicon=CASE WHEN $icon IS NOT NULL THEN $icon WHEN target=$target THEN favicon ELSE NULL END,
+                            updated_at=$now WHERE id=$id;
+                        """, ("$target", newTarget), ("$key", key), ("$icon", icon),
+                        ("$now", Time(DateTimeOffset.UtcNow)), ("$id", current.Id));
+            }
+            ApplyMetadataPatch(connection, transaction, current, patch);
+            ApplyMembershipDelta(connection, transaction, current.Id, add, remove);
+            result = RequireItem(connection, transaction, current.Id);
+        });
+        return result with { IsMissing = !Exists(result.Target, result.Type) };
+    }
+
+    private static void ApplyMetadataPatch(SqliteConnection connection, SqliteTransaction transaction,
+        ResourceItem current, ResourceMetadataPatch patch)
+    {
+        if ((patch.Alias == null || patch.Alias == current.Alias) &&
+            (patch.Description == null || patch.Description == current.Description) &&
+            (patch.Note == null || patch.Note == current.Note)) return;
+        Execute(connection, transaction, """
+            UPDATE Item SET alias=COALESCE($alias,alias),description=COALESCE($description,description),
+                note=COALESCE($note,note),updated_at=$now WHERE id=$id;
+            """, ("$alias", patch.Alias), ("$description", patch.Description), ("$note", patch.Note),
+            ("$now", Time(DateTimeOffset.UtcNow)), ("$id", patch.Id));
+    }
+
+    private static (string[] Add, string[] Remove) MembershipDelta(IEnumerable<string>? add, IEnumerable<string>? remove)
+    {
+        var added = (add ?? []).Distinct(StringComparer.Ordinal).ToArray();
+        var removed = (remove ?? []).Distinct(StringComparer.Ordinal).ToArray();
+        if (added.Concat(removed).Any(string.IsNullOrWhiteSpace)) throw new ArgumentException("项目 ID 不能为空。");
+        if (added.Intersect(removed, StringComparer.Ordinal).Any()) throw new ArgumentException("不能同时增加和移除同一个项目。");
+        return (added, removed);
+    }
+
+    private static void ApplyMembershipDelta(SqliteConnection connection, SqliteTransaction transaction,
+        string itemId, string[] add, string[] remove)
+    {
+        foreach (var projectId in add.Concat(remove)) RequireProject(connection, transaction, projectId);
+        var changed = 0;
+        foreach (var projectId in add)
+            changed += Execute(connection, transaction, "INSERT OR IGNORE INTO ProjectItem(project_id,item_id) VALUES($project,$item);",
+                ("$project", projectId), ("$item", itemId));
+        foreach (var projectId in remove)
+            changed += Execute(connection, transaction, "DELETE FROM ProjectItem WHERE project_id=$project AND item_id=$item;",
+                ("$project", projectId), ("$item", itemId));
+        if (changed > 0) Touch(connection, transaction, itemId);
+    }
+
+    private static bool SameBytes(byte[]? left, byte[]? right) =>
+        left == null ? right == null : right != null && left.AsSpan().SequenceEqual(right);
+
+    private static bool SameResourceContext(ResourceItem current, ResourceItem expected) =>
+        current.Id == expected.Id && current.Type == expected.Type && current.Target == expected.Target &&
+        current.Alias == expected.Alias && current.Description == expected.Description && current.Note == expected.Note &&
+        current.CreatedAt == expected.CreatedAt && current.UpdatedAt == expected.UpdatedAt &&
+        current.LastOpenedAt == expected.LastOpenedAt && current.OpenCount == expected.OpenCount &&
+        current.FileIdentity == expected.FileIdentity && SameBytes(current.Favicon, expected.Favicon) &&
+        current.Projects.OrderBy(project => project.Id, StringComparer.Ordinal)
+            .SequenceEqual(expected.Projects.OrderBy(project => project.Id, StringComparer.Ordinal));
+
     public Project CreateProject(string name, string description = "")
     {
         name = ValidateProjectName(name);
@@ -120,8 +390,10 @@ public sealed class LibraryService
         Write((connection, transaction) =>
         {
             EnsureProjectNameAvailable(connection, transaction, name);
-            Execute(connection, transaction, "INSERT INTO Project(id,name,name_key,description) VALUES($id,$name,$key,$description);",
-                ("$id", project.Id), ("$name", name), ("$key", name.ToUpperInvariant()), ("$description", project.Description));
+            project = project with { SortOrder = Convert.ToInt64(Scalar(connection, transaction,
+                "SELECT COALESCE(MAX(sort_order),-1)+1 FROM Project WHERE is_pinned=0;")) };
+            Execute(connection, transaction, "INSERT INTO Project(id,name,name_key,description,sort_order) VALUES($id,$name,$key,$description,$order);",
+                ("$id", project.Id), ("$name", name), ("$key", name.ToUpperInvariant()), ("$description", project.Description), ("$order", project.SortOrder));
         });
         return project;
     }
@@ -137,6 +409,52 @@ public sealed class LibraryService
                 ("$id", id), ("$name", name), ("$key", name.ToUpperInvariant()), ("$description", description ?? ""));
         });
     }
+
+    public Project PatchProject(string id, string? name = null, string? description = null, Project? expected = null)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(id);
+        if (name != null) name = ValidateProjectName(name);
+        Project result = null!;
+        Write((connection, transaction) =>
+        {
+            var current = ReadProject(connection, transaction, id) ?? throw new KeyNotFoundException("项目不存在。");
+            if (expected != null && (expected.Id != id ||
+                (name != null && current.Name != expected.Name) ||
+                (description != null && current.Description != expected.Description)))
+                throw new InvalidOperationException("项目已被其他进程修改，请刷新后重试。");
+            var newName = name ?? current.Name;
+            if (name != null) EnsureProjectNameAvailable(connection, transaction, newName, id);
+            Execute(connection, transaction, "UPDATE Project SET name=$name,name_key=$key,description=COALESCE($description,description) WHERE id=$id;",
+                ("$id", id), ("$name", newName), ("$key", newName.ToUpperInvariant()), ("$description", description));
+            result = current with { Name = newName, Description = description ?? current.Description };
+        });
+        return result;
+    }
+
+    public void SetProjectPinned(string id, bool pinned) => Write((connection, transaction) =>
+    {
+        RequireProject(connection, transaction, id);
+        Execute(connection, transaction, """
+            UPDATE Project SET is_pinned=$pinned,
+                sort_order=(SELECT COALESCE(MAX(sort_order),-1)+1 FROM Project WHERE is_pinned=$pinned)
+            WHERE id=$id AND is_pinned<>$pinned;
+            """, ("$id", id), ("$pinned", pinned ? 1 : 0));
+    });
+
+    /// <summary>Move relative to another project in the same pinned group, atomically.</summary>
+    public void MoveProject(string id, string targetId, bool after) => Write((connection, transaction) =>
+    {
+        var projects = ReadSnapshot(connection, transaction).Projects;
+        var source = projects.FirstOrDefault(project => project.Id == id) ?? throw new KeyNotFoundException("项目不存在。");
+        var target = projects.FirstOrDefault(project => project.Id == targetId) ?? throw new KeyNotFoundException("项目不存在。");
+        if (source.IsPinned != target.IsPinned) throw new InvalidOperationException("只能在同一置顶分组内排序。");
+        if (id == targetId) return;
+        var group = projects.Where(project => project.IsPinned == source.IsPinned && project.Id != id).ToList();
+        group.Insert(group.FindIndex(project => project.Id == targetId) + (after ? 1 : 0), source);
+        for (var index = 0; index < group.Count; index++)
+            Execute(connection, transaction, "UPDATE Project SET sort_order=$order WHERE id=$id;",
+                ("$id", group[index].Id), ("$order", index));
+    });
 
     public void DeleteProject(string id) => Write((connection, transaction) =>
     {
@@ -223,6 +541,7 @@ public sealed class LibraryService
         {
             using var connection = repository.Connect();
             var item = RequireItem(connection, null, itemId);
+            if (item.IsUrl) throw new NotSupportedException("网址没有本地文件位置。");
             EnsureExists(item);
             platform.OpenLocation(item.Target, item.Type);
         }
@@ -283,7 +602,8 @@ public sealed class LibraryService
             var newKeys = new HashSet<string>(StringComparer.Ordinal);
             foreach (var changedPath in changes.Values)
                 if (!newKeys.Add(ResourcePaths.Key(changedPath))) throw new IOException("修改后存在重复的资源路径。");
-            if (snapshot.Items.Any(candidate => !changes.ContainsKey(candidate.Id) && newKeys.Contains(ResourcePaths.Key(candidate.Target))))
+            if (snapshot.Items.Any(candidate => candidate.Type is "file" or "folder" &&
+                    !changes.ContainsKey(candidate.Id) && newKeys.Contains(ResourcePaths.Key(candidate.Target))))
                 throw new IOException("新路径已由另一个资源记录使用，请先处理重复记录。");
 
             var moved = false;
@@ -371,9 +691,18 @@ public sealed class LibraryService
         if (!Exists(item.Target, item.Type)) throw new FileNotFoundException("资源已缺失或暂时无法访问，请先修复路径。", item.Target);
     }
 
-    private ResourceItem ResolveOpenTarget(SqliteConnection connection, SqliteTransaction transaction, ResourceItem item)
+    private ResourceItem ResolveOpenTarget(SqliteConnection connection, SqliteTransaction transaction, ResourceItem item) =>
+        ResolveResourceTarget(connection, transaction, item, throwIfMissing: true);
+
+    private ResourceItem ResolveResourceTarget(SqliteConnection connection, SqliteTransaction transaction,
+        ResourceItem item, bool throwIfMissing)
     {
-        if (Exists(item.Target, item.Type)) return BackfillIdentity(connection, transaction, item);
+        if (item.IsUrl)
+        {
+            ResourceUrls.Normalize(item.Target);
+            return item with { IsMissing = false };
+        }
+        if (Exists(item.Target, item.Type)) return BackfillIdentity(connection, transaction, item) with { IsMissing = false };
         if (item.Type == "file" && item.FileIdentity is { } identity)
         {
             var recoveredPath = ResolveIdentity(identity);
@@ -386,11 +715,11 @@ public sealed class LibraryService
                 // Physical identity locates the file; logical identity and context belong to the existing item.
                 Execute(connection, transaction, "UPDATE Item SET target=$target,path_key=$key WHERE id=$id;",
                     ("$target", recoveredPath), ("$key", key), ("$id", item.Id));
-                return item with { Target = recoveredPath };
+                return item with { Target = recoveredPath, IsMissing = false };
             }
         }
-        EnsureExists(item);
-        return item;
+        if (throwIfMissing) EnsureExists(item);
+        return item with { IsMissing = true };
     }
 
     private ResourceItem BackfillIdentity(SqliteConnection connection, SqliteTransaction transaction, ResourceItem item)
@@ -426,13 +755,7 @@ public sealed class LibraryService
         exception is IOException or UnauthorizedAccessException or NotSupportedException or ArgumentException or System.ComponentModel.Win32Exception;
 
     private static ResourceItem RequireItem(SqliteConnection connection, SqliteTransaction? transaction, string id)
-    {
-        using var command = Command(connection, transaction, "SELECT id,type,target,volume_id,file_id FROM Item WHERE id=$id;", ("$id", id));
-        using var reader = command.ExecuteReader();
-        if (!reader.Read()) throw new KeyNotFoundException("资源记录不存在。");
-        return new ResourceItem(reader.GetString(0), reader.GetString(1), reader.GetString(2), "", "", "", default, default, null, 0, false, [],
-            reader.IsDBNull(3) || reader.IsDBNull(4) ? null : new FileIdentity(reader.GetString(3), reader.GetString(4)));
-    }
+        => ReadItem(connection, transaction, id) ?? throw new KeyNotFoundException("资源记录不存在。");
 
     private static void RequireProject(SqliteConnection connection, SqliteTransaction? transaction, string id)
     {

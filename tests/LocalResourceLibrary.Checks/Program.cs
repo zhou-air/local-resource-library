@@ -9,6 +9,7 @@ internal static class Program
     {
         (string Name, Action Run)[] checks =
         [
+            ("Project pinning and grouped ordering survive restart and reject cross-group moves", ProjectOrdering),
             ("Adding files and folders stores references only", AddReferences),
             ("Canonical paths share one item across projects", CanonicalDeduplication),
             ("Alias, description, and note preserve the physical resource", EditContext),
@@ -50,7 +51,16 @@ internal static class Program
             ("Version-one data migrates and backfills accessible files only", LegacyIdentityBackfill),
             ("Recovery database failure leaves the original reference unchanged", RecoveryDatabaseFailure),
             ("Shell failure keeps the recovered path without advancing history", RecoveryShellFailure),
-            ("Expected identity access failures preserve collection and Missing behavior", IdentityAccessFailure)
+            ("Expected identity access failures preserve collection and Missing behavior", IdentityAccessFailure),
+            ("URLs use exact deduplication and retain their spelling", UrlExactDeduplication),
+            ("Duplicate URLs preserve user fields and add project memberships", UrlDuplicateContext),
+            ("URL editing is atomic on collision and membership failure", UrlEditRollback),
+            ("URL icons and metadata persist without replacing manual edits", UrlPersistence),
+            ("URL opening records only successful dispatch and skips file checks", UrlOpenHistory),
+            ("URLs reject physical operations and coexist with folder transformations", UrlPhysicalSafety),
+            ("Mixed URL and physical bulk operations retain unrelated records", UrlMixedBulk),
+            ("Version-two databases retain physical identity during URL migration", UrlVersionTwoMigration),
+            ("Invalid URL and icon inputs cannot create or partly edit records", UrlInputValidation)
         ];
         var failures = new List<string>();
         foreach (var (name, run) in checks)
@@ -68,6 +78,41 @@ internal static class Program
         }
         Console.WriteLine($"\n{checks.Length - failures.Count}/{checks.Length} checks passed.");
         return failures.Count == 0 ? 0 : 1;
+    }
+
+    private static void ProjectOrdering()
+    {
+        using var fixture = new Fixture();
+        var library = fixture.Library;
+        library.CreateProject("Legacy B");
+        library.CreateProject("Legacy A");
+        fixture.ExecuteSql("ALTER TABLE Project DROP COLUMN is_pinned; ALTER TABLE Project DROP COLUMN sort_order; PRAGMA user_version=3;");
+        library = new LibraryService(fixture.DatabasePath, fixture.Platform);
+        Equal("Legacy A,Legacy B", string.Join(",", library.GetSnapshot(false).Projects.Select(p => p.Name)), "Migration preserves alphabetical order.");
+        Equal(0, library.GetSnapshot(false).Projects.Count(p => p.IsPinned), "Migration leaves projects unpinned.");
+        foreach (var project in library.GetSnapshot(false).Projects) library.DeleteProject(project.Id);
+        var a = library.CreateProject("A");
+        var b = library.CreateProject("B");
+        var c = library.CreateProject("C");
+        library.MoveProject(c.Id, a.Id, false);
+        Equal("C,A,B", string.Join(",", library.GetSnapshot(false).Projects.Select(p => p.Name)), "Normal projects reorder.");
+        library.SetProjectPinned(a.Id, true);
+        library.SetProjectPinned(b.Id, true);
+        library.MoveProject(b.Id, a.Id, false);
+        Throws(() => library.MoveProject(c.Id, a.Id, true), "Cross-group moves must be rejected.");
+        var reopened = new LibraryService(fixture.DatabasePath, fixture.Platform);
+        Equal("B,A,C", string.Join(",", reopened.GetSnapshot(false).Projects.Select(p => p.Name)), "Pinned order survives restart.");
+        Equal(2, reopened.GetSnapshot(false).Projects.Count(p => p.IsPinned), "Pin state survives restart.");
+        library.UpdateProject(b.Id, "Z");
+        Equal(b.Id, library.GetSnapshot(false).Projects[0].Id, "Rename must preserve position.");
+        library.SetProjectPinned(b.Id, false);
+        library.SetProjectPinned(b.Id, false);
+        Equal("A,C,Z", string.Join(",", library.GetSnapshot(false).Projects.Select(p => p.Name)), "Unpin appends to normal group.");
+        var d = library.CreateProject("D");
+        Equal(d.Id, library.GetSnapshot(false).Projects.Last().Id, "New projects append.");
+        var before = string.Join(",", library.GetSnapshot(false).Projects.Select(p => p.Id));
+        Throws(() => library.MoveProject(d.Id, "missing", false), "Missing targets must be rejected.");
+        Equal(before, string.Join(",", library.GetSnapshot(false).Projects.Select(p => p.Id)), "Failed moves must preserve order.");
     }
 
     private static void AddReferences()
@@ -843,7 +888,8 @@ internal static class Program
         Equal(existingPath, identities.GetPaths.Single(), "Backfill must inspect only the accessible legacy file.");
         Throws(() => fixture.Library.Open(missing.Id), "An unidentified missing legacy file must require explicit repair.");
         Equal(0, identities.ResolveIdentities.Count, "Missing legacy files must not invoke identity recovery.");
-        Equal(2L, Convert.ToInt64(fixture.SqlScalar("PRAGMA user_version;")), "The database must migrate to schema version two.");
+        Equal(4L, Convert.ToInt64(fixture.SqlScalar("PRAGMA user_version;")), "The database must migrate to schema version four.");
+        Require(checkedSnapshot.Items.All(item => item.Favicon is null), "Migration must leave physical resources without website icons.");
         var reopened = new LibraryService(fixture.DatabasePath, fixture.Platform, identities).GetSnapshot(checkPaths: false);
         Equal(identity, reopened.Items.Single(item => item.Id == before.Id).FileIdentity, "Legacy backfill must persist across restart.");
         var renamedPath = Path.Combine(fixture.SourceRoot, "legacy-renamed.txt");
@@ -937,6 +983,277 @@ internal static class Program
         Equal(backedUp.OpenCount, missing.OpenCount, "Unavailable volume access must not count as opening the file.");
         Equal(backedUp.FileIdentity, missing.FileIdentity, "Unavailable volume access must retain identity for a future retry.");
         SameContext(before, missing);
+    }
+
+    private static byte[] UrlIcon() => Convert.FromBase64String("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+kDZkAAAAASUVORK5CYII=");
+
+    private static void UrlExactDeduplication()
+    {
+        using var fixture = new Fixture();
+        const string target = "https://Example.com:443/Articles?q=One#Part";
+        var first = fixture.Library.AddUrl("  " + target + "  ", "", "", "", []);
+        Require(first.Added && first.Item.IsUrl, "URLs must be first-class resources.");
+        Equal(target, first.Item.Target, "The exact URL spelling must survive surrounding whitespace trimming.");
+        Equal("example.com", first.Item.RealName, "The fallback name must use the website host rather than a file name.");
+        var duplicate = fixture.Library.AddUrl(target, "ignored", "ignored", "ignored", []);
+        Require(!duplicate.Added, "Only the exact same URL must reuse the existing item.");
+        Equal(first.Item.Id, duplicate.Item.Id, "Exact URL duplicates must retain one stable ID.");
+        string[] distinct = [
+            "https://example.com:443/Articles?q=One#Part", "https://Example.com/Articles?q=One#Part",
+            "http://Example.com:443/Articles?q=One#Part", "https://Example.com:443/articles?q=One#Part",
+            "https://Example.com:443/Articles?q=one#Part", "https://Example.com:443/Articles?q=One#part",
+            "https://Example.com:443/Articles?q=One", "HTTPS://Example.com:443/Articles?q=One#Part"
+        ];
+        foreach (var url in distinct)
+        {
+            var result = fixture.Library.AddUrl(url, "", "", "", []);
+            Require(result.Added, $"Different exact spelling '{url}' must remain distinct.");
+            Equal(url, result.Item.Target, "Saving a URL must not rewrite its target.");
+            Equal("URL:" + url, ResourceUrls.Key(url), "URL keys must preserve the exact input.");
+        }
+        Equal(distinct.Length + 1, fixture.Library.GetSnapshot().Items.Count, "All exact-distinct URLs must coexist in the common Item table.");
+    }
+
+    private static void UrlDuplicateContext()
+    {
+        using var fixture = new Fixture();
+        var firstProject = fixture.Library.CreateProject("URL project Alpha");
+        var secondProject = fixture.Library.CreateProject("URL project Beta");
+        var icon = UrlIcon();
+        const string target = "https://example.test/manual";
+        var before = fixture.Library.AddUrl(target, "Manual title", "Manual description", "Manual note", [firstProject.Id], icon).Item;
+        fixture.Library.Open(before.Id);
+        before = fixture.Item(before.Id);
+        var duplicate = fixture.Library.AddUrl(target, "Fetched title", "Fetched description", "Fetched note", [secondProject.Id, secondProject.Id]);
+        Require(!duplicate.Added, "Adding a known URL must report reuse.");
+        Equal(before.Id, duplicate.Item.Id, "The known URL must retain its original ID.");
+        Equal(before.Alias, duplicate.Item.Alias, "Duplicate collection must preserve a manually chosen title.");
+        Equal(before.Description, duplicate.Item.Description, "Duplicate collection must preserve a manually chosen description.");
+        Equal(before.Note, duplicate.Item.Note, "Duplicate collection must preserve the original note.");
+        Require(icon.SequenceEqual(duplicate.Item.Favicon!), "Duplicate collection must preserve the stored favicon.");
+        Equal(before.CreatedAt, duplicate.Item.CreatedAt, "Duplicate collection must preserve creation time.");
+        Equal(before.OpenCount, duplicate.Item.OpenCount, "Duplicate collection must preserve open history.");
+        SetEqual([firstProject.Id, secondProject.Id], duplicate.Item.Projects.Select(project => project.Id), "URLs must belong to multiple projects.");
+        var unchanged = fixture.Library.AddUrl(target, "", "", "", [firstProject.Id, secondProject.Id]).Item;
+        Equal(duplicate.Item.UpdatedAt, unchanged.UpdatedAt, "A duplicate with no new memberships must not touch metadata time.");
+        Throws(() => fixture.Library.AddUrl(target, "", "", "", ["missing-project"]), "Invalid membership must be rejected even for a duplicate URL.");
+        SameContext(unchanged, fixture.Item(before.Id));
+        Equal(1, fixture.Library.GetSnapshot().Items.Count, "Duplicate collection must not create another resource.");
+    }
+
+    private static void UrlEditRollback()
+    {
+        using var fixture = new Fixture();
+        var project = fixture.Library.CreateProject("URL editing context");
+        var before = fixture.Library.AddUrl("https://example.test/one", "Original alias", "Original description", "Original note", [project.Id], UrlIcon()).Item;
+        var other = fixture.Library.AddUrl("https://example.test/two", "Other", "", "", []).Item;
+        Throws(() => fixture.Library.UpdateUrl(before.Id, other.Target, "Changed", "Changed", "Changed", []), "An edit collision must report the duplicate.");
+        var after = fixture.Item(before.Id);
+        SameContext(before, after);
+        Equal(before.Target, after.Target, "A collision must preserve the original target.");
+        Equal(before.UpdatedAt, after.UpdatedAt, "A collision must preserve metadata time.");
+        Require(before.Favicon!.SequenceEqual(after.Favicon!), "A collision must preserve the favicon.");
+        Throws(() => fixture.Library.UpdateUrl(before.Id, "https://example.test/new", "Changed", "Changed", "Changed", ["missing-project"]),
+            "Invalid projects must prevent target and metadata edits.");
+        Equal(before.Target, fixture.Item(before.Id).Target, "Project validation must occur before writing a new target.");
+        fixture.ExecuteSql("""
+            CREATE TRIGGER reject_url_membership BEFORE INSERT ON ProjectItem
+            BEGIN SELECT RAISE(ABORT, 'Injected URL membership write failure'); END;
+            """);
+        Throws(() => fixture.Library.UpdateUrl(before.Id, "https://example.test/new", "Changed", "Changed", "Changed", [project.Id]),
+            "A membership write failure must roll back URL and context changes.");
+        after = fixture.Item(before.Id);
+        SameContext(before, after);
+        Equal(before.Target, after.Target, "Membership write failure must restore the old URL.");
+        Equal(before.UpdatedAt, after.UpdatedAt, "Membership write failure must restore update time.");
+        Require(before.Favicon!.SequenceEqual(after.Favicon!), "Membership write failure must restore the icon.");
+        fixture.ExecuteSql("DROP TRIGGER reject_url_membership;");
+        fixture.Library.UpdateUrl(before.Id, "https://example.test/new", "Changed", "Changed description", "Changed note", []);
+        after = fixture.Item(before.Id);
+        Equal("https://example.test/new", after.Target, "A successful edit must replace the URL.");
+        Equal("Changed", after.Alias, "A successful edit must save manual context.");
+        Equal(0, after.Projects.Count, "A successful edit must save the selected memberships.");
+        Require(after.Favicon is null, "Changing the URL without a replacement favicon must drop the previous website's icon.");
+        Equal(other.Id, fixture.Item(other.Id).Id, "URL edits must preserve other resources.");
+    }
+
+    private static void UrlPersistence()
+    {
+        using var fixture = new Fixture();
+        var project = fixture.Library.CreateProject("Bookmark ProjectNeedle");
+        var sourceIcon = UrlIcon();
+        var item = fixture.Library.AddUrl("https://example.test/UrlNeedle?q=value#section", "AliasNeedle", "DescriptionNeedle", "NoteNeedle", [project.Id], sourceIcon).Item;
+        sourceIcon[0] = 0;
+        Require(item.Favicon![0] == 137, "The stored favicon must not share mutable input bytes.");
+        fixture.Library.UpdateItem(item.Id, "Manual AliasNeedle", "Manual DescriptionNeedle", "Manual NoteNeedle", [project.Id]);
+        fixture.Library.UpdateUrl(item.Id, item.Target, "Manual AliasNeedle", "Manual DescriptionNeedle", "Manual NoteNeedle", [project.Id]);
+        fixture.Library.Open(item.Id);
+        var before = fixture.Item(item.Id);
+        Require(UrlIcon().SequenceEqual(before.Favicon!), "Common metadata edits and same-URL edits must preserve the icon.");
+        var reopened = new LibraryService(fixture.DatabasePath, fixture.Platform).GetSnapshot();
+        var after = reopened.Items.Single();
+        SameContext(before, after);
+        Equal(before.Target, after.Target, "URLs must persist exactly across restart.");
+        Equal(before.CreatedAt, after.CreatedAt, "Creation time must persist.");
+        Equal(before.UpdatedAt, after.UpdatedAt, "Update time must persist.");
+        Equal(before.LastOpenedAt, after.LastOpenedAt, "URL open time must persist.");
+        Equal(before.OpenCount, after.OpenCount, "URL open count must persist.");
+        Require(before.Favicon!.SequenceEqual(after.Favicon!), "Favicon bytes must persist in the same SQLite database.");
+        Require(!after.IsMissing && after.FileIdentity is null, "URLs must never gain missing-file state or a physical identity.");
+        var search = new LocalTextSearchProvider();
+        foreach (var term in new[] { "AliasNeedle", "DescriptionNeedle", "NoteNeedle", "UrlNeedle", "q=value", "#section", "ProjectNeedle" })
+            Equal(item.Id, search.Search(reopened.Items, term).Single().Id, "All shared searchable fields must include URL resources.");
+    }
+
+    private static void UrlOpenHistory()
+    {
+        var identities = new TestFileIdentityProvider();
+        using var fixture = new Fixture(identities);
+        const string target = "https://Example.test:443/Start?x=1#part";
+        var before = fixture.Library.AddUrl(target, "", "", "", []).Item;
+        fixture.Library.GetSnapshot();
+        Equal(0, fixture.Platform.FileCheckPaths.Count, "URL snapshots must not check file existence.");
+        Equal(0, fixture.Platform.DirectoryCheckPaths.Count, "URL snapshots must not check directory existence.");
+        fixture.Platform.FailOpen = true;
+        Throws(() => fixture.Library.Open(before.Id), "Browser dispatch failures must be reported.");
+        var failed = fixture.Item(before.Id);
+        Equal(0L, failed.OpenCount, "Failed browser dispatch must not count an open.");
+        Equal(before.LastOpenedAt, failed.LastOpenedAt, "Failed dispatch must not change the last-opened time.");
+        Equal(before.UpdatedAt, failed.UpdatedAt, "Failed dispatch must not change metadata time.");
+        fixture.Platform.FailOpen = false;
+        fixture.Library.Open(before.Id);
+        var opened = fixture.Item(before.Id);
+        Equal(target, fixture.Platform.LastOpenedPath, "The browser must receive the exact stored URL.");
+        Equal(ResourceUrls.Type, fixture.Platform.LastOpenedType, "Browser dispatch must use the URL resource type.");
+        Equal(1L, opened.OpenCount, "A successful dispatch must count exactly once.");
+        Require(opened.LastOpenedAt != null && !opened.IsMissing, "A successful URL open must record time without missing-file state.");
+        Equal(0, identities.GetPaths.Count, "Opening URLs must never capture file identity.");
+        Equal(0, identities.ResolveIdentities.Count, "Opening URLs must never recover file identity.");
+        Equal(0, fixture.Platform.FileCheckPaths.Count, "URL opening must not inspect physical files.");
+        Equal(0, fixture.Platform.DirectoryCheckPaths.Count, "URL opening must not inspect physical directories.");
+    }
+
+    private static void UrlPhysicalSafety()
+    {
+        using var fixture = new Fixture();
+        var folder = fixture.Add(fixture.Folder("URL coexistence"));
+        var file = fixture.Add(fixture.File("URL coexistence", "child.txt", "original content"));
+        var before = fixture.Library.AddUrl("https://example.test/URL%20coexistence/child.txt", "Website", "Description", "Note", [], UrlIcon()).Item;
+        Throws(() => fixture.Library.OpenLocation(before.Id), "URLs have no physical explorer location.");
+        Throws(() => fixture.Library.RenamePhysical(before.Id, "renamed.txt"), "Physical rename must reject URLs.");
+        Throws(() => fixture.Library.RepairPath(before.Id, file.Target), "File-path repair must reject URLs.");
+        Throws(() => fixture.Library.UpdateUrl(file.Id, before.Target, "", "", "", []), "URL editing must reject physical resources.");
+        Equal(0, fixture.Platform.MoveCalls, "Rejected URL physical operations must never move a resource.");
+        Require(fixture.Platform.LastLocationPath is null, "Rejected URL location operations must not call explorer.");
+        fixture.Library.RenamePhysical(folder.Id, "URL renamed folder");
+        var renamedFolder = fixture.Item(folder.Id);
+        Equal(Path.Combine(renamedFolder.Target, "child.txt"), fixture.Item(file.Id).Target, "Folder rename must still rebase registered physical descendants.");
+        var after = fixture.Item(before.Id);
+        SameContext(before, after);
+        Equal(before.Target, after.Target, "Folder rename must leave URL targets untouched.");
+        Equal(before.UpdatedAt, after.UpdatedAt, "Folder rename must leave URL metadata times untouched.");
+        Require(before.Favicon!.SequenceEqual(after.Favicon!), "Folder rename must preserve URL favicons.");
+        var repairFolder = fixture.Folder("URL repair destination");
+        fixture.File("URL repair destination", "child.txt", "replacement content");
+        fixture.Library.RepairPath(folder.Id, repairFolder);
+        Equal(Path.Combine(repairFolder, "child.txt"), fixture.Item(file.Id).Target, "Folder repair must still rebase physical descendants.");
+        Equal(before.Target, fixture.Item(before.Id).Target, "Folder repair must preserve URL targets.");
+    }
+
+    private static void UrlMixedBulk()
+    {
+        using var fixture = new Fixture();
+        var firstProject = fixture.Library.CreateProject("Mixed Alpha");
+        var secondProject = fixture.Library.CreateProject("Mixed Beta");
+        var file = fixture.Add(fixture.File("mixed.txt", "must remain"));
+        var url = fixture.Library.AddUrl("https://example.test/mixed", "URL", "", "", [firstProject.Id, secondProject.Id]).Item;
+        var unrelated = fixture.Library.AddUrl("https://example.test/unrelated", "Other URL", "", "", [secondProject.Id]).Item;
+        fixture.Library.AddToProject(file.Id, firstProject.Id);
+        fixture.Library.AddToProject(file.Id, secondProject.Id);
+        fixture.Library.RemoveItemsFromProject([url.Id, file.Id], firstProject.Id);
+        SetEqual([secondProject.Id], fixture.Item(url.Id).Projects.Select(project => project.Id), "Mixed project removal must preserve the URL's other membership.");
+        SetEqual([secondProject.Id], fixture.Item(file.Id).Projects.Select(project => project.Id), "Mixed project removal must preserve the file's other membership.");
+        fixture.Library.AddToProject(url.Id, firstProject.Id);
+        fixture.Library.DeleteProject(firstProject.Id);
+        Equal(url.Target, fixture.Item(url.Id).Target, "Deleting a project must preserve URL records.");
+        Throws(() => fixture.Library.RemoveItemsFromLibrary([url.Id, file.Id, "unknown-item"]), "Invalid mixed selection must roll back all removals.");
+        Equal(3, fixture.Library.GetSnapshot().Items.Count, "Invalid mixed removal must preserve all resources.");
+        fixture.Library.RemoveItemsFromLibrary([url.Id, file.Id, url.Id]);
+        Equal(unrelated.Id, fixture.Library.GetSnapshot().Items.Single().Id, "Mixed logical removal must retain unrelated URL resources.");
+        Equal("must remain", System.IO.File.ReadAllText(file.Target), "Mixed removal must leave physical files untouched.");
+        Equal(0, fixture.Platform.MoveCalls, "Logical URL and file removal must not perform physical moves.");
+    }
+
+    private static void UrlVersionTwoMigration()
+    {
+        var identities = new TestFileIdentityProvider();
+        string file = "", folder = "";
+        using var fixture = new Fixture(identities, setup =>
+        {
+            file = setup.File("v2-file.txt", "v2 content");
+            folder = setup.Folder("v2-folder");
+            setup.CreateLegacyDatabase([(file, "file"), (folder, "folder")]);
+            setup.ExecuteSql("""
+                ALTER TABLE Item ADD COLUMN volume_id TEXT;
+                ALTER TABLE Item ADD COLUMN file_id TEXT;
+                UPDATE Item SET volume_id='preserved-volume',file_id='preserved-file' WHERE type='file';
+                PRAGMA user_version=2;
+                """);
+        });
+        var migrated = fixture.Library.GetSnapshot(checkPaths: false);
+        Equal(4L, Convert.ToInt64(fixture.SqlScalar("PRAGMA user_version;")), "Version-two databases must migrate to version four.");
+        Equal(2, migrated.Items.Count, "Migration must preserve all file and folder records.");
+        var physicalFile = migrated.Items.Single(item => item.Type == "file");
+        var physicalFolder = migrated.Items.Single(item => item.Type == "folder");
+        Equal(file, physicalFile.Target, "Migration must preserve file paths.");
+        Equal(folder, physicalFolder.Target, "Migration must preserve folder paths.");
+        Equal(new FileIdentity("preserved-volume", "preserved-file"), physicalFile.FileIdentity, "Migration must preserve captured physical identity.");
+        Require(physicalFolder.FileIdentity is null, "Migration must preserve path-only folder behavior.");
+        foreach (var item in migrated.Items)
+        {
+            Equal("Legacy alias", item.Alias, "Migration must preserve aliases.");
+            Equal("Legacy description", item.Description, "Migration must preserve descriptions.");
+            Equal("Legacy note", item.Note, "Migration must preserve notes.");
+            Equal(7L, item.OpenCount, "Migration must preserve open count.");
+            Equal(DateTimeOffset.Parse("2026-01-02T03:04:05+00:00"), item.CreatedAt, "Migration must preserve creation time.");
+            Equal(DateTimeOffset.Parse("2026-02-03T04:05:06+00:00"), item.UpdatedAt, "Migration must preserve update time.");
+            Equal(DateTimeOffset.Parse("2026-02-02T03:04:05+00:00"), item.LastOpenedAt, "Migration must preserve last-opened time.");
+            Equal("legacy-project", item.Projects.Single().Id, "Migration must preserve project membership.");
+            Require(item.Favicon is null, "Migration must not assign website icons to physical resources.");
+        }
+        Equal(0, identities.GetPaths.Count, "Migration must not inspect or recapture physical identity.");
+        fixture.Library.AddUrl("https://example.test/migrated", "New URL", "", "", ["legacy-project"]);
+        Equal(3, fixture.Library.GetSnapshot(checkPaths: false).Items.Count, "Migrated databases must support URLs alongside existing resources.");
+        fixture.ExecuteSql("PRAGMA user_version=5;");
+        Throws(() => new LibraryService(fixture.DatabasePath, fixture.Platform), "A future database schema must be rejected without downgrade.");
+        Equal(5L, Convert.ToInt64(fixture.SqlScalar("PRAGMA user_version;")), "Rejecting a future schema must not change its version.");
+        fixture.ExecuteSql("PRAGMA user_version=4;");
+    }
+
+    private static void UrlInputValidation()
+    {
+        using var fixture = new Fixture();
+        foreach (var invalid in new[] { "", "   ", "example.test", "/relative", "ftp://example.test", "file:///C:/test.txt", "javascript:alert(1)",
+                     "https://user:password@example.test/path", "https://example.test/a\nb", "https://example.test/a\0b", "https:///", "http://" })
+            Throws(() => fixture.Library.AddUrl(invalid, "", "", "", []), $"Invalid URL '{invalid.Replace("\n", "\\n").Replace("\0", "\\0")}' must be rejected.");
+        Equal(0, fixture.Library.GetSnapshot().Items.Count, "Rejected URLs must not create resources.");
+        var invalidIcons = new[] { Array.Empty<byte>(), "<svg xmlns='http://www.w3.org/2000/svg'/>"u8.ToArray(), new byte[ResourceUrls.MaxFaviconBytes + 1] };
+        foreach (var icon in invalidIcons)
+        {
+            Require(!ResourceUrls.IsSupportedFavicon(icon), "Invalid or oversized favicon content must be rejected.");
+            Throws(() => fixture.Library.AddUrl("https://example.test/icon", "", "", "", [], icon), "Invalid icons must prevent partial insert.");
+        }
+        Throws(() => fixture.Library.AddUrl("https://example.test/membership", "", "", "", ["missing-project"], UrlIcon()),
+            "Missing projects must prevent a partial URL insert.");
+        Equal(0, fixture.Library.GetSnapshot().Items.Count, "Invalid icons or projects must not leave partial records.");
+        var before = fixture.Library.AddUrl("https://example.test/valid", "Manual", "Manual description", "Manual note", [], UrlIcon()).Item;
+        Throws(() => fixture.Library.UpdateUrl(before.Id, "ftp://example.test", "Changed", "Changed", "Changed", []), "Invalid edits must not affect saved context.");
+        Throws(() => fixture.Library.UpdateUrl(before.Id, "https://example.test/changed", "Changed", "Changed", "Changed", [], invalidIcons[1]),
+            "Invalid replacement icons must not partly update the target.");
+        var after = fixture.Item(before.Id);
+        SameContext(before, after);
+        Equal(before.Target, after.Target, "Rejected edits must retain the URL.");
+        Require(before.Favicon!.SequenceEqual(after.Favicon!), "Rejected edits must retain the saved icon.");
     }
 
     private static void SameContext(ResourceItem before, ResourceItem after)
@@ -1128,9 +1445,19 @@ internal static class Program
         public string? LastOpenedPath { get; private set; }
         public string? LastOpenedType { get; private set; }
         public string? LastLocationPath { get; private set; }
+        public List<string> FileCheckPaths { get; } = [];
+        public List<string> DirectoryCheckPaths { get; } = [];
 
-        public bool FileExists(string path) => System.IO.File.Exists(path);
-        public bool DirectoryExists(string path) => Directory.Exists(path);
+        public bool FileExists(string path)
+        {
+            FileCheckPaths.Add(path);
+            return System.IO.File.Exists(path);
+        }
+        public bool DirectoryExists(string path)
+        {
+            DirectoryCheckPaths.Add(path);
+            return Directory.Exists(path);
+        }
 
         public void Open(string path, string type)
         {

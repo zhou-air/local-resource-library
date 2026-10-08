@@ -5,9 +5,13 @@
   <Folder Name="/src/">
     <Project Path="src/LocalResourceLibrary.WinUI/LocalResourceLibrary.WinUI.csproj" />
     <Project Path="src/LocalResourceLibrary.Core/LocalResourceLibrary.Core.csproj" />
+    <Project Path="src/LocalResourceLibrary.Mcp/LocalResourceLibrary.Mcp.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/LocalResourceLibrary.Checks/LocalResourceLibrary.Checks.csproj" />
     <Project Path="tests/LocalResourceLibrary.ExplorerChecks/LocalResourceLibrary.ExplorerChecks.csproj" />
+    <Project Path="tests/LocalResourceLibrary.UrlChecks/LocalResourceLibrary.UrlChecks.csproj" />
+    <Project Path="tests/LocalResourceLibrary.CoreConcurrencyChecks/LocalResourceLibrary.CoreConcurrencyChecks.csproj" />
+    <Project Path="tests/LocalResourceLibrary.McpChecks/LocalResourceLibrary.McpChecks.csproj" />
   </Folder>
 </Solution>

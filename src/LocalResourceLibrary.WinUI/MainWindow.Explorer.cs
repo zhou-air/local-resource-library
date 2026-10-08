@@ -14,8 +14,9 @@ namespace LocalResourceLibrary.WinUI;
 public sealed partial class MainWindow
 {
     private readonly ShellIconProvider _shellIcons = new();
-    private readonly Dictionary<ResourceRow, (string Target, int Size)> _loadedIconSizes = [];
-    private readonly HashSet<(ResourceRow Row, string Target, int Size)> _loadingIcons = [];
+    private readonly UrlIconProvider _urlIcons = new();
+    private readonly Dictionary<ResourceRow, (string Target, int Revision, int Size)> _loadedIconSizes = [];
+    private readonly HashSet<(ResourceRow Row, string Target, int Revision, int Size)> _loadingIcons = [];
     private readonly Queue<ResourceRow> _iconOrder = [];
     private bool _detailsOpen;
     private bool _explorerInitialized;
@@ -285,24 +286,28 @@ public sealed partial class MainWindow
     {
         var size = IconSize;
         var target = row.Target;
-        var request = (row, target, size);
-        if (_windowClosed || (_loadedIconSizes.TryGetValue(row, out var loaded) && loaded.Target == target && loaded.Size >= size) || !_loadingIcons.Add(request)) return;
+        var revision = row.IconRevision;
+        var request = (row, target, revision, size);
+        if (_windowClosed || (_loadedIconSizes.TryGetValue(row, out var loaded) && loaded.Target == target && loaded.Revision == revision && loaded.Size >= size) || !_loadingIcons.Add(request)) return;
         ImageSource? icon = null;
         try
         {
-            icon = await _shellIcons.GetAsync(target, row.IsFolder, size);
+            icon = row.IsUrl
+                ? await _urlIcons.GetAsync(row.Item.Favicon, size)
+                : await _shellIcons.GetAsync(target, row.IsFolder, size);
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or System.Runtime.InteropServices.COMException) { }
         finally
         {
             void Complete()
             {
-                if (!_windowClosed && row.Target == target && icon != null &&
-                    (!_loadedIconSizes.TryGetValue(row, out var current) || current.Target != target || current.Size <= size))
+                if (!_windowClosed && row.Target == target && row.IconRevision == revision &&
+                    (icon != null || row.IsUrl) &&
+                    (!_loadedIconSizes.TryGetValue(row, out var current) || current.Target != target || current.Revision != revision || current.Size <= size))
                 {
                     row.Icon = icon;
                     if (!_loadedIconSizes.ContainsKey(row)) _iconOrder.Enqueue(row);
-                    _loadedIconSizes[row] = (target, size);
+                    _loadedIconSizes[row] = (target, revision, size);
                     var attempts = _iconOrder.Count;
                     while (_loadedIconSizes.Count > 512 && attempts-- > 0 && _iconOrder.TryDequeue(out var oldest))
                     {

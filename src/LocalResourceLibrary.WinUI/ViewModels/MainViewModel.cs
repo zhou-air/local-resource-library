@@ -19,8 +19,9 @@ public abstract class Observable : INotifyPropertyChanged
     protected void Notify([CallerMemberName] string? name = null) => PropertyChanged?.Invoke(this, new(name));
 }
 
-public sealed record NavigationEntry(string Id, string Name, int Count, bool IsProject)
+public sealed record NavigationEntry(string Id, string Name, int Count, bool IsProject, bool IsPinned = false)
 {
+    public Visibility PinVisibility => IsProject && IsPinned ? Visibility.Visible : Visibility.Collapsed;
     public string IconGlyph => Id switch
     {
         "@all" => "\uE80F",
@@ -44,6 +45,7 @@ public sealed class ResourceRow : Observable
     private readonly Localizer _text;
     private ImageSource? _icon;
     private string? _shellType;
+    private int _iconRevision;
     public ResourceRow(ResourceItem item, Localizer text) : this(item, text, FileMetadata.Read(item)) { }
     internal ResourceRow(ResourceItem item, Localizer text, FileMetadata metadata)
     {
@@ -59,8 +61,11 @@ public sealed class ResourceRow : Observable
     public string Target => _item.Target;
     public string Description => _item.Description;
     public bool IsFolder => _item.Type == "folder";
-    public string Type => IsFolder ? _text["Folder"] : _shellType ?? FriendlyType();
-    public string IconGlyph => IsFolder ? "\uE8B7" : "\uE8A5";
+    public bool IsUrl => _item.IsUrl;
+    public string Type => IsUrl ? _text["Url"] : IsFolder ? _text["Folder"] : _shellType ?? FriendlyType();
+    public string IconGlyph => IsUrl ? "\uE774" : IsFolder ? "\uE8B7" : "\uE8A5";
+    // Each stored favicon replacement invalidates pending decoding for this row.
+    public int IconRevision => _iconRevision;
     public ImageSource? Icon { get => _icon; set { if (ReferenceEquals(_icon, value)) return; _icon = value; Notify(); Notify(nameof(IconVisibility)); Notify(nameof(FallbackIconVisibility)); } }
     public Visibility IconVisibility => Icon == null ? Visibility.Collapsed : Visibility.Visible;
     public Visibility FallbackIconVisibility => Icon == null ? Visibility.Visible : Visibility.Collapsed;
@@ -71,11 +76,12 @@ public sealed class ResourceRow : Observable
     public DateTimeOffset? FileModifiedAt { get; private set; }
     public long? FileSize { get; private set; }
     public string ModifiedText => FileModifiedAt?.ToLocalTime().ToString("yyyy-MM-dd HH:mm") ?? "—";
-    public string SizeText => IsFolder ? "" : FileSize is { } size ? FormatSize(size) : "—";
+    public string SizeText => IsFolder || IsUrl ? "" : FileSize is { } size ? FormatSize(size) : "—";
     public string LastOpened => _item.LastOpenedAt is { } date ? date.ToLocalTime().ToString("yyyy-MM-dd HH:mm") : _text["Never"];
 
     public void SetShellType(string? description)
     {
+        if (IsUrl) return;
         var next = string.IsNullOrWhiteSpace(description) ? null : description;
         if (_shellType == next) return;
         _shellType = next;
@@ -84,11 +90,19 @@ public sealed class ResourceRow : Observable
 
     internal void Update(ResourceItem item, FileMetadata metadata)
     {
+        if (!SameIcon(_item.Favicon, item.Favicon))
+        {
+            _iconRevision++;
+            Icon = null;
+        }
         _item = item;
         FileModifiedAt = metadata.ModifiedAt;
         FileSize = metadata.Size;
         Notify("");
     }
+
+    private static bool SameIcon(byte[]? left, byte[]? right) =>
+        ReferenceEquals(left, right) || (left != null && right != null && left.AsSpan().SequenceEqual(right));
 
     private string FriendlyType()
     {
@@ -133,6 +147,7 @@ internal sealed record FileMetadata(DateTimeOffset? ModifiedAt, long? Size)
 {
     public static FileMetadata Read(ResourceItem item)
     {
+        if (item.IsUrl) return new(item.UpdatedAt, null);
         if (item.IsMissing) return new(null, null);
         try
         {
@@ -249,6 +264,10 @@ public sealed class MainViewModel : Observable
     public string SelectionText => HasSelection ? Text.Format("SelectedCount", SelectedRows.Count) : "";
     public Visibility DetailsVisibility => HasSingleSelection ? Visibility.Visible : Visibility.Collapsed;
     public Visibility ChooseVisibility => HasSingleSelection ? Visibility.Collapsed : Visibility.Visible;
+    public Visibility UrlVisibility => Selected?.IsUrl == true ? Visibility.Visible : Visibility.Collapsed;
+    public Visibility PhysicalVisibility => Selected is { IsUrl: false } ? Visibility.Visible : Visibility.Collapsed;
+    public string TargetLabel => Text[Selected?.IsUrl == true ? "Url" : "Path"];
+    public string CopyTargetLabel => Text[Selected?.IsUrl == true ? "CopyUrl" : "CopyPath"];
     public Visibility MissingVisibility => Selected?.IsMissing == true ? Visibility.Visible : Visibility.Collapsed;
     public string MissingHelpText => Text.IsEnglish
         ? "This path is missing or temporarily unavailable. Its details and project membership are preserved."
@@ -270,15 +289,21 @@ public sealed class MainViewModel : Observable
     public bool IsReady => !IsBusy;
     private string _status;
     public string Status { get => _status; set { _status = value; Notify(); } }
-    private string _alias = "", _description = "", _note = "";
+    private string _alias = "", _description = "", _note = "", _urlTarget = "";
+    public ResourceItem? DraftBaseline { get; private set; }
     public string Alias { get => _alias; set { _alias = value; Notify(); NotifyDirty(); } }
-    public string AliasForSave => Selected is { } row && string.IsNullOrWhiteSpace(row.Item.Alias) && _alias == row.Item.RealName
-        ? row.Item.Alias : _alias;
+    public string AliasForSave => DraftBaseline is { } item && string.IsNullOrWhiteSpace(item.Alias) && _alias == item.RealName
+        ? item.Alias : _alias;
     public string Description { get => _description; set { _description = value; Notify(); NotifyDirty(); } }
     public string Note { get => _note; set { _note = value; Notify(); NotifyDirty(); } }
-    public bool IsDirty => Selected is { } selected &&
-        (AliasForSave != selected.Item.Alias || _description != selected.Item.Description || _note != selected.Item.Note ||
-        !Memberships.Where(p => p.IsSelected).Select(p => p.Id).ToHashSet().SetEquals(selected.Item.Projects.Select(p => p.Id)));
+    public string UrlTarget { get => _urlTarget; set { _urlTarget = value; Notify(); NotifyDirty(); } }
+    public bool IsDirty => DraftBaseline is { } item && Selected != null &&
+        (AliasForSave != item.Alias || _description != item.Description || _note != item.Note ||
+        (item.IsUrl && _urlTarget != item.Target) ||
+        !Memberships.Where(p => p.IsSelected).Select(p => p.Id).ToHashSet().SetEquals(item.Projects.Select(p => p.Id)));
+    public ResourceEditDraft? CreateEditDraft(string? normalizedUrl = null) => DraftBaseline is { } item
+        ? ResourceEditDraft.Create(item, AliasForSave, Description, Note,
+            Memberships.Where(choice => choice.IsSelected).Select(choice => choice.Id), normalizedUrl) : null;
     public string SaveState => Text[IsDirty ? "Unsaved" : "Saved"];
     private void NotifyDirty() { Notify(nameof(IsDirty)); Notify(nameof(SaveState)); }
     public string? CurrentProjectId => Navigation.FirstOrDefault(p => p.Id == NavigationId && p.IsProject)?.Id;
@@ -295,8 +320,8 @@ public sealed class MainViewModel : Observable
         Navigation.Add(new("@all", Text["All"], snapshot.Items.Count, false));
         Navigation.Add(new("@recent", Text["Recent"], snapshot.Items.Count(i => i.LastOpenedAt != null), false));
         Navigation.Add(new("@missing", Text["Missing"], snapshot.Items.Count(i => i.IsMissing), false));
-        foreach (var project in snapshot.Projects.OrderBy(p => p.Name, StringComparer.CurrentCultureIgnoreCase))
-            Navigation.Add(new(project.Id, project.Name, snapshot.Items.Count(i => i.Projects.Any(p => p.Id == project.Id)), true));
+        foreach (var project in snapshot.Projects)
+            Navigation.Add(new(project.Id, project.Name, snapshot.Items.Count(i => i.Projects.Any(p => p.Id == project.Id)), true, project.IsPinned));
         if (!Navigation.Any(p => p.Id == NavigationId)) NavigationId = "@all";
         Filter();
     }
@@ -375,11 +400,14 @@ public sealed class MainViewModel : Observable
     {
         var selection = rows.DistinctBy(row => row.Id).ToArray();
         var row = selection.Length == 1 ? selection[0] : null;
-        var keepDraft = preserveDraft && row != null && ReferenceEquals(row, Selected);
+        var keepDraft = preserveDraft && row != null && row.Id == Selected?.Id &&
+            (ReferenceEquals(row, Selected) || IsDirty);
         SelectedRows = selection;
-        if (keepDraft) { Notify(""); return; }
+        if (keepDraft) { Selected = row; Notify(""); return; }
         Selected = row;
+        DraftBaseline = row?.Item;
         _alias = row?.Item.DisplayName ?? ""; _description = row?.Item.Description ?? ""; _note = row?.Item.Note ?? "";
+        _urlTarget = row?.IsUrl == true ? row.Target : "";
         Memberships.Clear();
         foreach (var project in Snapshot.Projects.OrderBy(p => p.Name, StringComparer.CurrentCultureIgnoreCase))
         {

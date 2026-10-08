@@ -128,18 +128,33 @@ public sealed partial class MainWindow : Window
         _vm.Alias = AliasBox.Text;
         _vm.Description = DescriptionBox.Text;
         _vm.Note = NoteBox.Text;
+        if (_vm.Selected.IsUrl) _vm.UrlTarget = UrlTargetBox.Text;
     }
 
     private async Task<bool> SaveDetailsAsync()
     {
+        if (_vm.IsBusy) return false;
         SyncDraft();
         if (_vm.Selected == null || !_vm.IsDirty) return true;
-        var id = _vm.Selected.Id;
-        var alias = _vm.AliasForSave;
-        var description = _vm.Description;
-        var note = _vm.Note;
-        var projects = _vm.Memberships.Where(choice => choice.IsSelected).Select(choice => choice.Id).ToArray();
-        return await RunAsync(() => _library.UpdateItem(id, alias, description, note, projects), "Saved", id, false);
+        var expected = _vm.DraftBaseline!;
+        string? url = null;
+        byte[]? favicon = null;
+        if (_vm.Selected.IsUrl)
+        {
+            try { url = ResourceUrls.Normalize(_vm.UrlTarget); }
+            catch (ArgumentException exception) { await ShowErrorAsync(exception); return false; }
+            if (url != expected.Target)
+            {
+                _vm.IsBusy = true;
+                _vm.Status = _text["FetchingWebsite"];
+                try { favicon = (await new UrlMetadataFetcher().FetchAsync(url)).Favicon; }
+                catch { /* Metadata is optional; saving a valid URL must remain available. */ }
+                finally { _vm.IsBusy = false; }
+            }
+        }
+        var edit = _vm.CreateEditDraft(url)!;
+        return await RunAsync(() => _library.ApplyResourceEdit(edit.Expected, edit.Metadata,
+            edit.AddProjectIds, edit.RemoveProjectIds, edit.Url, favicon), "Saved", expected.Id, false);
     }
 
     private async Task<bool> EnsureEditsAsync()
@@ -250,9 +265,13 @@ public sealed partial class MainWindow : Window
     }
 
     private async void Save_Click(object sender, RoutedEventArgs e) => await SaveDetailsAsync();
-    private void Discard_Click(object sender, RoutedEventArgs e) => _vm.Select(_vm.Selected);
+    private void Discard_Click(object sender, RoutedEventArgs e)
+    {
+        if (!_vm.IsBusy) _vm.Select(_vm.Selected);
+    }
     private async void Refresh_Click(object sender, RoutedEventArgs e)
     {
+        // F5 re-reads shared metadata as well as physical availability, after resolving local edits.
         if (await EnsureEditsAsync()) await RunAsync(() => { }, "RefreshDone");
     }
 
@@ -261,11 +280,73 @@ public sealed partial class MainWindow : Window
         var menu = new MenuFlyout();
         var file = new MenuFlyoutItem { Text = _text["AddFile"], Icon = new SymbolIcon(Symbol.Document) };
         var folder = new MenuFlyoutItem { Text = _text["AddFolder"], Icon = new SymbolIcon(Symbol.Folder) };
+        var url = new MenuFlyoutItem { Text = _text["AddUrl"], Icon = new FontIcon { Glyph = "\uE774" } };
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(url, "AddUrlMenu");
         file.Click += AddFile_Click;
         folder.Click += AddFolder_Click;
+        url.Click += AddUrl_Click;
         menu.Items.Add(file);
         menu.Items.Add(folder);
+        menu.Items.Add(url);
         menu.ShowAt((FrameworkElement)sender);
+    }
+
+    private async void AddUrl_Click(object sender, RoutedEventArgs e)
+    {
+        if (!await EnsureEditsAsync()) return;
+        Dialogs.UrlInput? input;
+        _dialogOpen = true;
+        try { input = await Dialogs.UrlAsync(Root, _text, _vm.Snapshot, _vm.CurrentProjectId); }
+        catch (Exception exception) { _dialogOpen = false; await ShowErrorAsync(exception); return; }
+        finally { _dialogOpen = false; }
+        if (input == null) return;
+        AddUrlResult? result = null;
+        if (await RunAsync(() => result = _library.AddUrl(input.Target, input.Alias, input.Description,
+                input.Note, input.ProjectIds, input.Favicon), checkPaths: false) && result != null)
+        {
+            Render(_vm.Snapshot, result.Item.Id);
+            _vm.Status = _text.Format("AddResult", result.Added ? 1 : 0, result.Added ? 0 : 1);
+        }
+    }
+
+    private async void EditUrl_Click(object sender, RoutedEventArgs e)
+    {
+        if (_vm.Selected?.IsUrl != true || !await EnsureEditsAsync()) return;
+        var item = _vm.Selected.Item;
+        Dialogs.UrlInput? input;
+        _dialogOpen = true;
+        try { input = await Dialogs.UrlAsync(Root, _text, _vm.Snapshot, _vm.CurrentProjectId, item); }
+        catch (Exception exception) { _dialogOpen = false; await ShowErrorAsync(exception); return; }
+        finally { _dialogOpen = false; }
+        if (input == null) return;
+        var edit = ResourceEditDraft.Create(item, input.Alias, input.Description, input.Note, input.ProjectIds, input.Target);
+        if (!await RunAsync(() => _library.ApplyResourceEdit(edit.Expected, edit.Metadata,
+                edit.AddProjectIds, edit.RemoveProjectIds, edit.Url, input.Favicon), "Saved", item.Id, false))
+        {
+            // Keep the user's attempted edit visible when a concurrent write prevents saving.
+            _vm.Alias = input.Alias;
+            _vm.Description = input.Description;
+            _vm.Note = input.Note;
+            _vm.UrlTarget = input.Target;
+            foreach (var choice in _vm.Memberships) choice.IsSelected = input.ProjectIds.Contains(choice.Id);
+        }
+    }
+
+    private void EditDetails_Click(object sender, RoutedEventArgs e)
+    {
+        if (!_vm.HasSingleSelection) return;
+        _detailsOpen = true;
+        UpdatePaneWidths();
+        AliasBox.Focus(FocusState.Keyboard);
+        SelectAliasName();
+    }
+
+    private void EditMemberships_Click(object sender, RoutedEventArgs e)
+    {
+        if (!_vm.HasSingleSelection) return;
+        _detailsOpen = true;
+        UpdatePaneWidths();
+        MembershipSection.StartBringIntoView();
     }
 
     private async void AddFile_Click(object sender, RoutedEventArgs e)
@@ -354,6 +435,7 @@ public sealed partial class MainWindow : Window
 
     private async void Location_Click(object sender, RoutedEventArgs e)
     {
+        if (_vm.Selected?.IsUrl == true) return;
         var id = _vm.Selected?.Id;
         if (id != null && await EnsureEditsAsync()) await RunAsync(() => _library.OpenLocation(id), "Ready", id);
     }
@@ -366,7 +448,8 @@ public sealed partial class MainWindow : Window
             var data = new DataPackage();
             data.SetText(string.Join(Environment.NewLine, _vm.SelectedRows.Select(row => row.Target)));
             Clipboard.SetContent(data);
-            _vm.Status = _text["Copied"];
+            _vm.Status = _text[_vm.SelectedRows.All(row => row.IsUrl) ? "UrlCopied" :
+                _vm.SelectedRows.Any(row => row.IsUrl) ? "TargetsCopied" : "Copied"];
         }
         catch (Exception exception) { await ShowErrorAsync(exception); }
     }

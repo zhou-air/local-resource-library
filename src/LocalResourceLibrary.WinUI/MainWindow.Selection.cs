@@ -71,11 +71,6 @@ public sealed partial class MainWindow
         await RunAsync(() => _library.RemoveItemsFromLibrary(selected.Select(item => item.Id)), "Deleted", checkPaths: false);
     }
 
-    private async void DeleteProject_Click(object sender, RoutedEventArgs e)
-    {
-        if (_vm.CurrentProjectId is { } id) await DeleteProjectAsync(id);
-    }
-
     private async Task DeleteProjectAsync(string id)
     {
         if (!await EnsureEditsAsync()) return;
@@ -135,11 +130,20 @@ public sealed partial class MainWindow
         if (row != null && _vm.HasSingleSelection)
         {
             menu.Items.Add(MenuItem(_text["Open"], "ResourceOpenMenu", Open_Click, Symbol.OpenFile));
-            menu.Items.Add(MenuItem(_text["OpenLocation"], "ResourceLocationMenu", Location_Click, Symbol.Folder));
+            if (row.IsUrl)
+                menu.Items.Add(MenuItem(_text["EditUrl"], "ResourceEditUrlMenu", EditUrl_Click, Symbol.Edit));
+            else
+            {
+                menu.Items.Add(MenuItem(_text["OpenLocation"], "ResourceLocationMenu", Location_Click, Symbol.Folder));
+                menu.Items.Add(MenuItem(_text["EditDetails"], "ResourceEditDetailsMenu", EditDetails_Click, Symbol.Edit));
+            }
+            menu.Items.Add(MenuItem(_text["EditMemberships"], "ResourceMembershipsMenu", EditMemberships_Click));
         }
         if (row != null && ids.Length > 0)
         {
-            menu.Items.Add(MenuItem(_text["CopyPath"], "ResourceCopyPathsMenu", CopyPath_Click, Symbol.Copy));
+            var copyKey = _vm.SelectedRows.All(selected => selected.IsUrl) ? "CopyUrl" :
+                _vm.SelectedRows.Any(selected => selected.IsUrl) ? "CopyTargets" : "CopyPath";
+            menu.Items.Add(MenuItem(_text[copyKey], "ResourceCopyPathsMenu", CopyPath_Click, Symbol.Copy));
             menu.Items.Add(new MenuFlyoutSeparator());
             if (_vm.CurrentProjectId is { } projectId)
                 menu.Items.Add(MenuItem(_text["RemoveFromProject"], "ResourceRemoveProjectMenu",
@@ -162,7 +166,7 @@ public sealed partial class MainWindow
         try { result = await Dialogs.InputAsync(Root, _text, _text["RenameProject"], _text["ProjectName"], project.Name); }
         finally { _dialogOpen = false; }
         if (result != null)
-            await RunAsync(() => _library.UpdateProject(id, result.Value.Value, project.Description), checkPaths: false);
+            await RunAsync(() => _library.PatchProject(id, name: result.Value.Value, expected: project), checkPaths: false);
     }
 
     private void Navigation_RightTapped(object sender, RightTappedRoutedEventArgs e)
@@ -170,6 +174,8 @@ public sealed partial class MainWindow
         if (_vm.IsBusy || _dialogOpen || ItemAtSource(NavigationList, e.OriginalSource) is not NavigationEntry { IsProject: true } project) return;
         e.Handled = true;
         var menu = new MenuFlyout();
+        menu.Items.Add(MenuItem(_text[project.IsPinned ? "UnpinProject" : "PinProject"], "ProjectPinMenu",
+            async (_, _) => await ToggleProjectPinAsync(project)));
         menu.Items.Add(MenuItem(_text["RenameProject"], "ProjectRenameMenu", async (_, _) => await RenameProjectAsync(project.Id), Symbol.Edit));
         menu.Items.Add(MenuItem(_text["DeleteProject"], "ProjectDeleteMenu", async (_, _) => await DeleteProjectAsync(project.Id), Symbol.Delete));
         menu.ShowAt(NavigationList, new FlyoutShowOptions { Position = e.GetPosition(NavigationList) });

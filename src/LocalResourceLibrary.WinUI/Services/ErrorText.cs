@@ -7,6 +7,11 @@ public static class ErrorText
 {
     private static readonly (string Chinese, string English)[] Messages =
     [
+        ("请输入完整的 HTTP 或 HTTPS 网址，不能包含控制字符或登录凭据。", "Enter a complete HTTP or HTTPS URL without control characters or embedded credentials."),
+        ("网站图标必须为 PNG、JPEG、GIF 或 ICO 图片，且不超过 512 KB。", "The website icon must be PNG, JPEG, GIF or ICO and no larger than 512 KB."),
+        ("此操作仅适用于网址资源。", "This operation is only available for URL resources."),
+        ("资源库中已存在完全相同的网址，请使用现有记录。", "This exact URL is already in the library. Use the existing record."),
+        ("网址没有本地文件位置。", "A URL has no local file location."),
         ("此资源类型暂不支持重命名。", "Renaming is not supported for this resource type yet."),
         ("打开资源需要 Windows。", "Opening resources requires Windows."),
         ("路径不能为空。", "The path cannot be empty."),
@@ -20,6 +25,8 @@ public static class ErrorText
         ("不能重命名驱动器或共享根目录。", "A drive or shared root folder cannot be renamed."),
         ("新路径不存在、暂时无法访问，或资源类型与原记录不同。", "The new path does not exist, is temporarily unavailable, or has a different resource type."),
         ("资源记录不存在。", "The resource record no longer exists."),
+        ("资源已被其他进程修改，请保留当前草稿，刷新后重新编辑。", "Another process changed this resource. Keep your current draft, then refresh and edit it again."),
+        ("项目已被其他进程修改，请刷新后重试。", "Another process changed this project. Refresh and try again."),
         ("此类型暂不支持修改本地路径。", "Changing the local path is not supported for this resource type yet."),
         ("目标名称已存在，不能覆盖其他文件或文件夹。", "The destination name already exists. Existing files or folders cannot be overwritten."),
         ("新路径不能位于原文件夹内部。", "The new path cannot be inside the original folder."),

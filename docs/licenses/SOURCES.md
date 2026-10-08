@@ -1,5 +1,7 @@
 # Included license sources
 
+- `ModelContextProtocol-Apache-2.0.txt`: [official C# SDK LICENSE at the 2.2.0 NuGet source commit](https://raw.githubusercontent.com/modelcontextprotocol/csharp-sdk/6fa3825973949a9c4f0cd8af344e15a8db09dc35/LICENSE), retrieved 2026-10-08. Both SDK NuGet packages declare Apache-2.0 and copyright Model Context Protocol a Series of LF Projects, LLC. The exact source commit is recorded in the restored package metadata.
+
 - `Microsoft.Data.Sqlite-MIT.txt`: [dotnet/efcore LICENSE.txt](https://raw.githubusercontent.com/dotnet/efcore/main/LICENSE.txt), retrieved 2026-10-07. Installed Microsoft.Data.Sqlite 10.0.12 package metadata declares MIT.
 - `SQLitePCLRaw-Apache-2.0.txt`: [SQLitePCL.raw v2.1.12 LICENSE.TXT](https://raw.githubusercontent.com/ericsink/SQLitePCL.raw/v2.1.12/LICENSE.TXT), retrieved 2026-10-07. Installed SQLitePCLRaw 2.1.12 packages declare Apache-2.0 and Copyright 2014–2024 SourceGear, LLC.
 - `runtime/`: generated in a self-contained release by copying license and notice files from the exact .NET runtime packs selected in `LocalResourceLibrary.WinUI.runtimeconfig.json`.

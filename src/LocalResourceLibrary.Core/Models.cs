@@ -1,6 +1,6 @@
 namespace LocalResourceLibrary.Core;
 
-public record Project(string Id, string Name, string Description);
+public record Project(string Id, string Name, string Description, bool IsPinned = false, long SortOrder = 0);
 
 public record ResourceItem(
     string Id,
@@ -15,12 +15,15 @@ public record ResourceItem(
     long OpenCount,
     bool IsMissing,
     IReadOnlyList<Project> Projects,
-    FileIdentity? FileIdentity = null)
+    FileIdentity? FileIdentity = null,
+    byte[]? Favicon = null)
 {
-    public string RealName => Path.GetFileName(Path.TrimEndingDirectorySeparator(Target)) is { Length: > 0 } name
+    public bool IsUrl => Type == ResourceUrls.Type;
+    public string RealName => IsUrl ? ResourceUrls.DisplayName(Target) : Path.GetFileName(Path.TrimEndingDirectorySeparator(Target)) is { Length: > 0 } name
         ? name : Target;
     public string DisplayName => string.IsNullOrWhiteSpace(Alias) ? RealName : Alias;
 }
 
 public record LibrarySnapshot(IReadOnlyList<ResourceItem> Items, IReadOnlyList<Project> Projects);
 public record AddResourcesResult(int Added, int Existing, IReadOnlyList<string> Errors);
+public record AddUrlResult(ResourceItem Item, bool Added);
