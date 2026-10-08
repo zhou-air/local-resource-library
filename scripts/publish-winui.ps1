@@ -1,5 +1,5 @@
 [CmdletBinding()]
-param([switch]$Zip, [switch]$SkipPublish)
+param([switch]$Zip, [switch]$SkipPublish, [switch]$KeepPrevious)
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 $projectRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
@@ -7,6 +7,7 @@ $distRoot = [System.IO.Path]::GetFullPath((Join-Path $projectRoot 'dist'))
 $releaseName = 'LocalResourceLibrary-WinUI-win-x64'
 $releaseDirectory = Join-Path $distRoot $releaseName
 $suffix = (Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + [Guid]::NewGuid().ToString('N').Substring(0,8)
+$previousOutputs = [System.Collections.Generic.List[string]]::new()
 function Assert-DistPath([string]$Path) {
     $absolute = [System.IO.Path]::GetFullPath($Path)
     if (-not $absolute.StartsWith($distRoot.TrimEnd('\') + '\', [System.StringComparison]::OrdinalIgnoreCase)) { throw "Unexpected release path: $absolute" }
@@ -30,6 +31,9 @@ New-Item -ItemType Directory -Path $docsDestination -Force | Out-Null
 foreach ($entry in Get-ChildItem -LiteralPath (Join-Path $projectRoot 'docs')) { Copy-Item -LiteralPath $entry.FullName -Destination $docsDestination -Recurse -Force }
 Copy-Item -LiteralPath (Join-Path $projectRoot 'docs/winui-trial.md') -Destination (Join-Path $output 'README-WINUI.md') -Force
 Copy-Item -LiteralPath (Join-Path $projectRoot 'THIRD-PARTY-NOTICES.md') -Destination $output -Force
+if (Test-Path -LiteralPath (Join-Path $projectRoot 'AGENTS.md') -PathType Leaf) {
+    Copy-Item -LiteralPath (Join-Path $projectRoot 'AGENTS.md') -Destination $output -Force
+}
 foreach ($licenseFile in @('LICENSE', 'LICENSE.md', 'LICENSE.txt')) {
     $licensePath = Join-Path $projectRoot $licenseFile
     if (Test-Path -LiteralPath $licensePath -PathType Leaf) { Copy-Item -LiteralPath $licensePath -Destination $output -Force }
@@ -65,6 +69,7 @@ if (-not $SkipPublish) {
     if (Test-Path -LiteralPath $releaseDirectory) {
         $previous = Join-Path $distRoot ('.previous-winui-' + $suffix)
         Assert-DistPath $previous
+        $previousOutputs.Add($previous)
         Move-Item -LiteralPath $releaseDirectory -Destination $previous
     }
     Move-Item -LiteralPath $output -Destination $releaseDirectory
@@ -78,9 +83,16 @@ if ($Zip) {
     if (Test-Path -LiteralPath $archive) {
         $previousArchive = Join-Path $distRoot ('.previous-winui-' + $suffix + '.zip')
         Assert-DistPath $previousArchive
+        $previousOutputs.Add($previousArchive)
         Move-Item -LiteralPath $archive -Destination $previousArchive
     }
     Move-Item -LiteralPath $stagingArchive -Destination $archive
     Write-Host "WinUI archive: $archive"
+}
+if (-not $KeepPrevious) {
+    foreach ($previousOutput in $previousOutputs) {
+        Assert-DistPath $previousOutput
+        Remove-Item -LiteralPath $previousOutput -Recurse -Force
+    }
 }
 Write-Host "WinUI folder: $releaseDirectory"

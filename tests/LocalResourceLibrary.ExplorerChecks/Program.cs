@@ -12,7 +12,11 @@ internal static class Program
     {
         (string Name, Action Run)[] checks =
         [
+            ("Alias defaults to original name without creating unsaved changes", AliasDefault),
+            ("System display language selects Chinese or English fallback", SystemLanguage),
             ("Details defaults to hidden and follows selection", Selection),
+            ("Multiple selection hides individual editing and survives sorting and filtering", MultipleSelection),
+            ("Deleted selections and projects leave no stale commands or drafts", RemovedSelection),
             ("Explorer natural ordering and folders first work in both directions", NaturalOrdering),
             ("File sizes sort numerically with unknown values last", SizeOrdering),
             ("Modification and open dates sort with unknown values last", DateOrdering),
@@ -34,6 +38,32 @@ internal static class Program
         return failures == 0 ? 0 : 1;
     }
 
+    private static void AliasDefault()
+    {
+        using var fixture = new Fixture();
+        var vm = fixture.Model;
+        vm.Load(new([Missing("manual.txt")], []));
+        vm.Select(vm.Rows[0]);
+        Equal(vm.Selected!.Item.RealName, vm.Alias);
+        Equal(false, vm.IsDirty);
+        Equal(vm.Selected.Item.Alias, vm.AliasForSave);
+        vm.Description = "updated";
+        Equal(vm.Selected.Item.Alias, vm.AliasForSave);
+        vm.Alias = "custom.txt";
+        Equal(true, vm.IsDirty);
+        Equal("custom.txt", vm.AliasForSave);
+    }
+
+    private static void SystemLanguage()
+    {
+        foreach (var name in new[] { "zh-CN", "zh-TW", "zh-HK" })
+            Equal("zh-CN", LocalResourceLibrary.WinUI.Services.SettingsStore.ResolveLanguage(new System.Globalization.CultureInfo(name)));
+        foreach (var name in new[] { "en-US", "en-GB", "fr-FR", "ja-JP", "" })
+            Equal("en", LocalResourceLibrary.WinUI.Services.SettingsStore.ResolveLanguage(new System.Globalization.CultureInfo(name)));
+        Equal(LocalResourceLibrary.WinUI.Services.SettingsStore.ResolveLanguage(System.Globalization.CultureInfo.CurrentUICulture),
+            LocalResourceLibrary.WinUI.Services.SettingsStore.GetSystemLanguage());
+    }
+
     private static void Selection()
     {
         using var fixture = new Fixture();
@@ -44,6 +74,67 @@ internal static class Program
         vm.Select(vm.Rows[0]);
         Equal(Visibility.Visible, vm.DetailsVisibility);
         vm.Select(null);
+        Equal(Visibility.Collapsed, vm.DetailsVisibility);
+    }
+
+    private static void MultipleSelection()
+    {
+        using var fixture = new Fixture();
+        var vm = fixture.Model;
+        vm.Load(new([Missing("file2.txt"), Missing("file10.txt"), Missing("other.txt")], []));
+        var first = vm.Rows[0];
+        var second = vm.Rows[1];
+        vm.SelectMany([first, second, first]);
+        Equal(2, vm.SelectedRows.Count);
+        Equal(true, vm.HasSelection);
+        Equal(false, vm.HasSingleSelection);
+        Equal(false, vm.IsDirty);
+        Equal(Visibility.Collapsed, vm.DetailsVisibility);
+        Equal(true, vm.CanDeleteResources);
+        vm.IsBusy = true;
+        Equal(false, vm.CanDeleteResources);
+        vm.IsBusy = false;
+        vm.SortDescending = true;
+        vm.Reorder();
+        Equal(2, vm.SelectedRows.Count);
+        vm.ViewMode = ResourceViewMode.LargeIcons;
+        vm.Query = "file";
+        vm.Filter();
+        Equal(2, vm.SelectedRows.Count);
+        vm.Query = "file2";
+        vm.Filter();
+        Equal(1, vm.SelectedRows.Count);
+        Same(first, vm.Selected!);
+        vm.Alias = "unfinished";
+        vm.SelectMany([first], preserveDraft: true);
+        vm.Filter();
+        Equal("unfinished", vm.Alias);
+        Equal(true, vm.IsDirty);
+        vm.Select(first); // Explicit discard resets the single-item draft.
+        Equal(false, vm.IsDirty);
+    }
+
+    private static void RemovedSelection()
+    {
+        using var fixture = new Fixture();
+        var vm = fixture.Model;
+        var project = new Project("project", "Temporary", "");
+        var first = Missing("first") with { Projects = [project] };
+        var second = Missing("second") with { Projects = [project] };
+        vm.NavigationId = project.Id;
+        vm.Load(new([first, second], [project]));
+        Equal(true, vm.CanDeleteProject);
+        vm.SelectMany(vm.Rows);
+        vm.Load(new([second], [project]));
+        Equal(1, vm.SelectedRows.Count);
+        Equal(second.Id, vm.Selected!.Id);
+        vm.Load(new([], []));
+        Equal("@all", vm.NavigationId);
+        Equal(false, vm.HasSelection);
+        Equal(false, vm.CanDeleteResources);
+        Equal(false, vm.CanDeleteProject);
+        Equal(false, vm.IsDirty);
+        Equal("", vm.SelectionText);
         Equal(Visibility.Collapsed, vm.DetailsVisibility);
     }
 

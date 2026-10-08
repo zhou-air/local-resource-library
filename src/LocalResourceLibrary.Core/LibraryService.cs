@@ -8,30 +8,41 @@ public sealed class LibraryService
 {
     private readonly LibraryRepository repository;
     private readonly IResourcePlatform platform;
+    private readonly IFileIdentityProvider fileIdentityProvider;
     private readonly object gate = new();
     public string DatabasePath => repository.DatabasePath;
 
-    public LibraryService(string databasePath, IResourcePlatform? platform = null)
+    public LibraryService(string databasePath, IResourcePlatform? platform = null, IFileIdentityProvider? fileIdentityProvider = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(databasePath);
         this.platform = platform ?? new WindowsResourcePlatform();
+        this.fileIdentityProvider = fileIdentityProvider ?? new WindowsFileIdentityProvider();
         repository = new LibraryRepository(databasePath);
     }
 
     public LibrarySnapshot GetSnapshot(bool checkPaths = true)
     {
-        LibrarySnapshot snapshot;
         lock (gate)
         {
             using var connection = repository.Connect();
-            using var transaction = connection.BeginTransaction(deferred: true);
-            snapshot = ReadSnapshot(connection, transaction);
+            using var transaction = connection.BeginTransaction(deferred: !checkPaths);
+            var snapshot = ReadSnapshot(connection, transaction);
+            if (checkPaths)
+            {
+                snapshot = snapshot with
+                {
+                    Items = snapshot.Items.Select(item =>
+                    {
+                        var exists = Exists(item.Target, item.Type);
+                        // Opportunistically upgrade legacy files, without locating missing targets.
+                        if (exists) item = BackfillIdentity(connection, transaction, item);
+                        return item with { IsMissing = !exists };
+                    }).ToArray()
+                };
+            }
             transaction.Commit();
+            return snapshot;
         }
-        return !checkPaths ? snapshot : snapshot with
-        {
-            Items = snapshot.Items.Select(item => item with { IsMissing = !Exists(item.Target, item.Type) }).ToArray()
-        };
     }
 
     public AddResourcesResult AddPaths(IEnumerable<string> paths, string? projectId = null)
@@ -59,10 +70,13 @@ public sealed class LibraryService
                         if (type == null) throw new FileNotFoundException("路径不存在或暂时无法访问。", target);
                         itemId = Guid.NewGuid().ToString("N");
                         var now = Time(DateTimeOffset.UtcNow);
+                        var identity = type == "file" ? CaptureIdentity(target) : null;
                         Execute(connection, transaction,
-                            "INSERT INTO Item(id,type,target,path_key,created_at,updated_at) VALUES($id,$type,$target,$key,$now,$now);",
-                            ("$id", itemId), ("$type", type), ("$target", target), ("$key", key), ("$now", now));
+                            "INSERT INTO Item(id,type,target,path_key,created_at,updated_at,volume_id,file_id) VALUES($id,$type,$target,$key,$now,$now,$volume,$file);",
+                            ("$id", itemId), ("$type", type), ("$target", target), ("$key", key), ("$now", now),
+                            ("$volume", identity?.VolumeId), ("$file", identity?.FileId));
                     }
+                    else BackfillIdentity(connection, transaction, RequireItem(connection, transaction, itemId!));
                     if (projectId != null)
                     {
                         RequireProject(connection, transaction, projectId);
@@ -148,25 +162,58 @@ public sealed class LibraryService
         Touch(connection, transaction, itemId);
     });
 
-    public void RemoveFromLibrary(string itemId) => Write((connection, transaction) =>
+    public void RemoveFromLibrary(string itemId) => RemoveItemsFromLibrary([itemId]);
+
+    /// <summary>Remove all selected records in one transaction; never touch the physical resources.</summary>
+    public void RemoveItemsFromLibrary(IEnumerable<string> itemIds)
     {
-        RequireItem(connection, transaction, itemId);
-        Execute(connection, transaction, "DELETE FROM Item WHERE id=$id;", ("$id", itemId));
-    });
+        ArgumentNullException.ThrowIfNull(itemIds);
+        var ids = itemIds.Distinct(StringComparer.Ordinal).ToArray();
+        if (ids.Length == 0) return;
+        Write((connection, transaction) =>
+        {
+            foreach (var id in ids) RequireItem(connection, transaction, id);
+            foreach (var id in ids)
+                Execute(connection, transaction, "DELETE FROM Item WHERE id=$id;", ("$id", id));
+        });
+    }
+
+    public void RemoveItemsFromProject(IEnumerable<string> itemIds, string projectId)
+    {
+        ArgumentNullException.ThrowIfNull(itemIds);
+        var ids = itemIds.Distinct(StringComparer.Ordinal).ToArray();
+        if (ids.Length == 0) return;
+        Write((connection, transaction) =>
+        {
+            RequireProject(connection, transaction, projectId);
+            foreach (var id in ids) RequireItem(connection, transaction, id);
+            foreach (var id in ids)
+            {
+                Execute(connection, transaction, "DELETE FROM ProjectItem WHERE project_id=$project AND item_id=$item;",
+                    ("$project", projectId), ("$item", id));
+                Touch(connection, transaction, id);
+            }
+        });
+    }
 
     public void Open(string itemId)
     {
         lock (gate)
         {
             using var connection = repository.Connect();
-            using var transaction = connection.BeginTransaction();
-            var item = RequireItem(connection, transaction, itemId);
-            EnsureExists(item);
+            ResourceItem item;
+            using (var transaction = connection.BeginTransaction())
+            {
+                item = ResolveOpenTarget(connection, transaction, RequireItem(connection, transaction, itemId));
+                // A verified path repair remains valid even if the external application cannot launch.
+                transaction.Commit();
+            }
             // Only successful Windows shell dispatch counts; application-level success cannot be observed here.
             platform.Open(item.Target, item.Type);
-            Execute(connection, transaction, "UPDATE Item SET last_opened_at=$now,open_count=open_count+1,updated_at=$now WHERE id=$id;",
+            using var historyTransaction = connection.BeginTransaction();
+            Execute(connection, historyTransaction, "UPDATE Item SET last_opened_at=$now,open_count=open_count+1,updated_at=$now WHERE id=$id;",
                 ("$now", Time(DateTimeOffset.UtcNow)), ("$id", itemId));
-            transaction.Commit();
+            historyTransaction.Commit();
         }
     }
 
@@ -214,7 +261,15 @@ public sealed class LibraryService
                        ?? throw new KeyNotFoundException("资源记录不存在。");
             if (item.Type is not ("file" or "folder")) throw new NotSupportedException("此类型暂不支持修改本地路径。");
             var target = makeTarget(item);
-            if (string.Equals(item.Target, target, StringComparison.Ordinal)) return;
+            if (string.Equals(item.Target, target, StringComparison.Ordinal))
+            {
+                if (!movePhysical && item.Type == "file")
+                {
+                    StoreIdentity(connection, transaction, item.Id, CaptureIdentity(target));
+                    transaction.Commit();
+                }
+                return;
+            }
             var samePath = string.Equals(item.Target, target, StringComparison.OrdinalIgnoreCase);
             if (movePhysical && !samePath && (platform.FileExists(target) || platform.DirectoryExists(target)))
                 throw new IOException("目标名称已存在，不能覆盖其他文件或文件夹。");
@@ -248,8 +303,14 @@ public sealed class LibraryService
                     Execute(connection, transaction, "UPDATE Item SET path_key=$key WHERE id=$id;",
                         ("$key", "pending:" + Guid.NewGuid().ToString("N")), ("$id", id));
                 foreach (var (id, changedPath) in changes)
+                {
                     Execute(connection, transaction, "UPDATE Item SET target=$target,path_key=$key,updated_at=$now WHERE id=$id;",
                         ("$target", changedPath), ("$key", ResourcePaths.Key(changedPath)), ("$now", now), ("$id", id));
+                    var changedItem = snapshot.Items.First(candidate => candidate.Id == id);
+                    if (changedItem.Type == "file")
+                        StoreIdentity(connection, transaction, id,
+                            CaptureIdentity(changedPath) ?? (movePhysical ? changedItem.FileIdentity : null));
+                }
                 transaction.Commit();
             }
             catch (Exception original)
@@ -310,12 +371,67 @@ public sealed class LibraryService
         if (!Exists(item.Target, item.Type)) throw new FileNotFoundException("资源已缺失或暂时无法访问，请先修复路径。", item.Target);
     }
 
+    private ResourceItem ResolveOpenTarget(SqliteConnection connection, SqliteTransaction transaction, ResourceItem item)
+    {
+        if (Exists(item.Target, item.Type)) return BackfillIdentity(connection, transaction, item);
+        if (item.Type == "file" && item.FileIdentity is { } identity)
+        {
+            var recoveredPath = ResolveIdentity(identity);
+            if (recoveredPath != null && platform.FileExists(recoveredPath) && CaptureIdentity(recoveredPath) == identity)
+            {
+                var key = ResourcePaths.Key(recoveredPath);
+                if (Scalar(connection, transaction, "SELECT id FROM Item WHERE path_key=$key AND id<>$id;",
+                        ("$key", key), ("$id", item.Id)) is string)
+                    throw new IOException("新路径已由另一个资源记录使用，请先处理重复记录。");
+                // Physical identity locates the file; logical identity and context belong to the existing item.
+                Execute(connection, transaction, "UPDATE Item SET target=$target,path_key=$key WHERE id=$id;",
+                    ("$target", recoveredPath), ("$key", key), ("$id", item.Id));
+                return item with { Target = recoveredPath };
+            }
+        }
+        EnsureExists(item);
+        return item;
+    }
+
+    private ResourceItem BackfillIdentity(SqliteConnection connection, SqliteTransaction transaction, ResourceItem item)
+    {
+        if (item.Type != "file" || item.FileIdentity != null) return item;
+        var identity = CaptureIdentity(item.Target);
+        if (identity == null) return item;
+        StoreIdentity(connection, transaction, item.Id, identity);
+        return item with { FileIdentity = identity };
+    }
+
+    private static void StoreIdentity(SqliteConnection connection, SqliteTransaction transaction, string itemId, FileIdentity? identity) =>
+        Execute(connection, transaction, "UPDATE Item SET volume_id=$volume,file_id=$file WHERE id=$id;",
+            ("$volume", identity?.VolumeId), ("$file", identity?.FileId), ("$id", itemId));
+
+    private FileIdentity? CaptureIdentity(string path)
+    {
+        try { return fileIdentityProvider.GetIdentity(path); }
+        catch (Exception exception) when (IdentityUnavailable(exception)) { return null; }
+    }
+
+    private string? ResolveIdentity(FileIdentity identity)
+    {
+        try
+        {
+            var path = fileIdentityProvider.ResolvePath(identity);
+            return path == null ? null : ResourcePaths.Normalize(path);
+        }
+        catch (Exception exception) when (IdentityUnavailable(exception)) { return null; }
+    }
+
+    private static bool IdentityUnavailable(Exception exception) =>
+        exception is IOException or UnauthorizedAccessException or NotSupportedException or ArgumentException or System.ComponentModel.Win32Exception;
+
     private static ResourceItem RequireItem(SqliteConnection connection, SqliteTransaction? transaction, string id)
     {
-        using var command = Command(connection, transaction, "SELECT id,type,target FROM Item WHERE id=$id;", ("$id", id));
+        using var command = Command(connection, transaction, "SELECT id,type,target,volume_id,file_id FROM Item WHERE id=$id;", ("$id", id));
         using var reader = command.ExecuteReader();
         if (!reader.Read()) throw new KeyNotFoundException("资源记录不存在。");
-        return new ResourceItem(reader.GetString(0), reader.GetString(1), reader.GetString(2), "", "", "", default, default, null, 0, false, []);
+        return new ResourceItem(reader.GetString(0), reader.GetString(1), reader.GetString(2), "", "", "", default, default, null, 0, false, [],
+            reader.IsDBNull(3) || reader.IsDBNull(4) ? null : new FileIdentity(reader.GetString(3), reader.GetString(4)));
     }
 
     private static void RequireProject(SqliteConnection connection, SqliteTransaction? transaction, string id)

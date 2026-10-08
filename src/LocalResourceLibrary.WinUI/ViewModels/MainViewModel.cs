@@ -241,9 +241,14 @@ public sealed class MainViewModel : Observable
     public string NavigationId { get; set; } = "@all";
     public string Query { get; set; } = "";
     public ResourceRow? Selected { get; private set; }
-    public bool HasSelection => Selected != null;
-    public Visibility DetailsVisibility => HasSelection ? Visibility.Visible : Visibility.Collapsed;
-    public Visibility ChooseVisibility => HasSelection ? Visibility.Collapsed : Visibility.Visible;
+    public IReadOnlyList<ResourceRow> SelectedRows { get; private set; } = [];
+    public bool HasSelection => SelectedRows.Count > 0;
+    public bool HasSingleSelection => Selected != null;
+    public bool CanDeleteResources => IsReady && HasSelection;
+    public bool CanDeleteProject => IsReady && CurrentProjectId != null;
+    public string SelectionText => HasSelection ? Text.Format("SelectedCount", SelectedRows.Count) : "";
+    public Visibility DetailsVisibility => HasSingleSelection ? Visibility.Visible : Visibility.Collapsed;
+    public Visibility ChooseVisibility => HasSingleSelection ? Visibility.Collapsed : Visibility.Visible;
     public Visibility MissingVisibility => Selected?.IsMissing == true ? Visibility.Visible : Visibility.Collapsed;
     public string MissingHelpText => Text.IsEnglish
         ? "This path is missing or temporarily unavailable. Its details and project membership are preserved."
@@ -261,16 +266,18 @@ public sealed class MainViewModel : Observable
     public string SelectedModifiedText => Selected?.ModifiedText ?? "";
     public string OpenCountText => Selected?.Item.OpenCount.ToString() ?? "";
     private bool _busy;
-    public bool IsBusy { get => _busy; set { _busy = value; Notify(); Notify(nameof(IsReady)); } }
+    public bool IsBusy { get => _busy; set { _busy = value; Notify(); Notify(nameof(IsReady)); Notify(nameof(CanDeleteResources)); Notify(nameof(CanDeleteProject)); } }
     public bool IsReady => !IsBusy;
     private string _status;
     public string Status { get => _status; set { _status = value; Notify(); } }
     private string _alias = "", _description = "", _note = "";
     public string Alias { get => _alias; set { _alias = value; Notify(); NotifyDirty(); } }
+    public string AliasForSave => Selected is { } row && string.IsNullOrWhiteSpace(row.Item.Alias) && _alias == row.Item.RealName
+        ? row.Item.Alias : _alias;
     public string Description { get => _description; set { _description = value; Notify(); NotifyDirty(); } }
     public string Note { get => _note; set { _note = value; Notify(); NotifyDirty(); } }
     public bool IsDirty => Selected is { } selected &&
-        (_alias != selected.Item.Alias || _description != selected.Item.Description || _note != selected.Item.Note ||
+        (AliasForSave != selected.Item.Alias || _description != selected.Item.Description || _note != selected.Item.Note ||
         !Memberships.Where(p => p.IsSelected).Select(p => p.Id).ToHashSet().SetEquals(selected.Item.Projects.Select(p => p.Id)));
     public string SaveState => Text[IsDirty ? "Unsaved" : "Saved"];
     private void NotifyDirty() { Notify(nameof(IsDirty)); Notify(nameof(SaveState)); }
@@ -303,6 +310,8 @@ public sealed class MainViewModel : Observable
         rows.Sort(CompareRows);
         Rows.Clear();
         foreach (var row in rows) Rows.Add(row);
+        var selectedIds = SelectedRows.Select(row => row.Id).ToHashSet(StringComparer.Ordinal);
+        SelectMany(Rows.Where(row => selectedIds.Contains(row.Id)), preserveDraft: true);
         Notify(nameof(EmptyVisibility)); Notify(nameof(EmptyTitle)); Notify(nameof(EmptyHelp)); Notify(nameof(ViewTitle)); Notify(nameof(CountText));
     }
 
@@ -360,10 +369,17 @@ public sealed class MainViewModel : Observable
         if (right == null) return -1;
         return Directed(left.Value.CompareTo(right.Value));
     }
-    public void Select(ResourceRow? row)
+    public void Select(ResourceRow? row) => SelectMany(row == null ? [] : [row]);
+
+    public void SelectMany(IEnumerable<ResourceRow> rows, bool preserveDraft = false)
     {
+        var selection = rows.DistinctBy(row => row.Id).ToArray();
+        var row = selection.Length == 1 ? selection[0] : null;
+        var keepDraft = preserveDraft && row != null && ReferenceEquals(row, Selected);
+        SelectedRows = selection;
+        if (keepDraft) { Notify(""); return; }
         Selected = row;
-        _alias = row?.Item.Alias ?? ""; _description = row?.Item.Description ?? ""; _note = row?.Item.Note ?? "";
+        _alias = row?.Item.DisplayName ?? ""; _description = row?.Item.Description ?? ""; _note = row?.Item.Note ?? "";
         Memberships.Clear();
         foreach (var project in Snapshot.Projects.OrderBy(p => p.Name, StringComparer.CurrentCultureIgnoreCase))
         {

@@ -23,18 +23,17 @@ public sealed partial class MainWindow : Window
 {
     private readonly LibraryService _library;
     private readonly Localizer _text;
-    private readonly SettingsStore _settings;
     private readonly MainViewModel _vm;
     private readonly DispatcherQueueTimer _searchTimer;
     private bool _rendering = true;
     private bool _dialogOpen;
     private bool _allowClose;
+    private readonly TrayIcon _tray;
 
-    public MainWindow(LibraryService library, Localizer text, SettingsStore settings)
+    public MainWindow(LibraryService library, Localizer text, string instanceKey)
     {
         _library = library;
         _text = text;
-        _settings = settings;
         _vm = new MainViewModel(text, library.DatabasePath);
         InitializeComponent();
         Root.DataContext = _vm;
@@ -53,7 +52,6 @@ public sealed partial class MainWindow : Window
         AppWindow.Closing += Window_Closing;
         Root.ActualThemeChanged += (_, _) => UpdateTitleBar();
         UpdateTitleBar();
-        LanguageBox.SelectedIndex = text.IsEnglish ? 1 : 0;
         _searchTimer = DispatcherQueue.CreateTimer();
         _searchTimer.Interval = TimeSpan.FromMilliseconds(220);
         _searchTimer.Tick += async (_, _) =>
@@ -63,6 +61,12 @@ public sealed partial class MainWindow : Window
         };
         _rendering = false;
         InitializeExplorer();
+        var iconPath = System.IO.Path.Combine(AppContext.BaseDirectory, "Assets", "Library.ico");
+        AppWindow.SetIcon(iconPath);
+        _tray = new TrayIcon(instanceKey, iconPath, text["Title"], text["OpenLibrary"], text["ExitLibrary"]);
+        _tray.RestoreRequested += () => DispatcherQueue.TryEnqueue(RestoreFromTray);
+        _tray.ExitRequested += () => DispatcherQueue.TryEnqueue(async () => await ExitFromTrayAsync());
+        Closed += (_, _) => { _searchTimer.Stop(); _tray.Dispose(); };
     }
 
     private void UpdateTitleBar()
@@ -76,19 +80,20 @@ public sealed partial class MainWindow : Window
 
     private async void Root_Loaded(object sender, RoutedEventArgs e) => await RunAsync(() => { }, "Ready");
 
-    private void Render(LibrarySnapshot snapshot, string? selectedId)
+    private void Render(LibrarySnapshot snapshot, string? selectedId, bool preserveSelection = false)
     {
         var previousId = _vm.Selected?.Id;
         var detailsWereOpen = _detailsOpen;
+        var selectedIds = preserveSelection ? _vm.SelectedRows.Select(row => row.Id).ToHashSet(StringComparer.Ordinal) : [];
+        if (selectedId != null) selectedIds.Add(selectedId);
         _rendering = true;
         try
         {
             _vm.Load(snapshot);
             NavigationList.SelectedItem = _vm.Navigation.FirstOrDefault(entry => entry.Id == _vm.NavigationId);
-            var selected = _vm.Rows.FirstOrDefault(row => row.Id == selectedId);
-            _vm.Select(selected);
-            ResourceList.SelectedItem = selected;
-            ResourceGrid.SelectedItem = selected;
+            _vm.SelectMany(_vm.Rows.Where(row => selectedIds.Contains(row.Id)));
+            SyncResourceSelection();
+            var selected = _vm.Selected;
             _detailsOpen = selected != null && (selected.Id != previousId || detailsWereOpen);
             ApplyPresentation();
         }
@@ -106,6 +111,17 @@ public sealed partial class MainWindow : Window
         };
     }
 
+    private void AliasBox_GotFocus(object sender, RoutedEventArgs e)
+    {
+        // Run after the pointer places its caret so entering the field retains selection.
+        DispatcherQueue.TryEnqueue(SelectAliasName);
+    }
+
+    private void SelectAliasName()
+    {
+        AliasBox.SelectAll();
+    }
+
     private void SyncDraft()
     {
         if (_vm.Selected == null) return;
@@ -119,7 +135,7 @@ public sealed partial class MainWindow : Window
         SyncDraft();
         if (_vm.Selected == null || !_vm.IsDirty) return true;
         var id = _vm.Selected.Id;
-        var alias = _vm.Alias;
+        var alias = _vm.AliasForSave;
         var description = _vm.Description;
         var note = _vm.Note;
         var projects = _vm.Memberships.Where(choice => choice.IsSelected).Select(choice => choice.Id).ToArray();
@@ -146,7 +162,8 @@ public sealed partial class MainWindow : Window
         return true;
     }
 
-    private async Task<bool> RunAsync(Action action, string successKey = "Saved", string? selectedId = null, bool checkPaths = true)
+    private async Task<bool> RunAsync(Action action, string successKey = "Saved", string? selectedId = null, bool checkPaths = true,
+        bool refreshOnFailure = false)
     {
         if (_vm.IsBusy) return false;
         _searchTimer.Stop();
@@ -158,12 +175,22 @@ public sealed partial class MainWindow : Window
             await Task.Run(action);
             if (checkPaths) _vm.InvalidateFileMetadata();
             var snapshot = await Task.Run(() => checkPaths ? _library.GetSnapshot() : ReadMetadata());
-            Render(snapshot, selectedId);
+            Render(snapshot, selectedId, preserveSelection: true);
             _vm.Status = _text[successKey];
             return true;
         }
         catch (Exception exception)
         {
+            if (refreshOnFailure)
+            {
+                try
+                {
+                    _vm.InvalidateFileMetadata();
+                    var snapshot = await Task.Run(() => _library.GetSnapshot());
+                    Render(snapshot, selectedId, preserveSelection: true);
+                }
+                catch { /* Keep the original open error if refreshing the library also fails. */ }
+            }
             await ShowErrorAsync(exception);
             return false;
         }
@@ -182,27 +209,7 @@ public sealed partial class MainWindow : Window
     private async void Resource_Changed(object sender, SelectionChangedEventArgs e)
     {
         if (_rendering) return;
-        var selected = ((ListViewBase)sender).SelectedItem as ResourceRow;
-        if (selected?.Id == _vm.Selected?.Id) return;
-        if (!await EnsureEditsAsync())
-        {
-            _rendering = true;
-            ResourceList.SelectedItem = _vm.Selected;
-            ResourceGrid.SelectedItem = _vm.Selected;
-            _rendering = false;
-            return;
-        }
-        var freshSelection = _vm.Rows.FirstOrDefault(row => row.Id == selected?.Id);
-        _rendering = true;
-        try
-        {
-            _vm.Select(freshSelection);
-            ResourceList.SelectedItem = freshSelection;
-            ResourceGrid.SelectedItem = freshSelection;
-            _detailsOpen = freshSelection != null;
-            UpdatePaneWidths();
-        }
-        finally { _rendering = false; }
+        await ChangeResourceSelectionAsync(((ListViewBase)sender).SelectedItems.OfType<ResourceRow>().Select(row => row.Id).ToArray());
     }
 
     private async void Navigation_Changed(object sender, SelectionChangedEventArgs args)
@@ -239,7 +246,7 @@ public sealed partial class MainWindow : Window
             return;
         }
         _vm.Query = SearchBox.Text;
-        Render(_vm.Snapshot, _vm.Selected?.Id);
+        Render(_vm.Snapshot, _vm.Selected?.Id, preserveSelection: true);
     }
 
     private async void Save_Click(object sender, RoutedEventArgs e) => await SaveDetailsAsync();
@@ -247,44 +254,6 @@ public sealed partial class MainWindow : Window
     private async void Refresh_Click(object sender, RoutedEventArgs e)
     {
         if (await EnsureEditsAsync()) await RunAsync(() => { }, "RefreshDone");
-    }
-
-    private async void Language_Changed(object sender, SelectionChangedEventArgs e)
-    {
-        if (_rendering || _vm.IsBusy || LanguageBox.SelectedItem is not ComboBoxItem choice) return;
-        var language = choice.Tag as string;
-        if (language == null || language == _text.Language) return;
-        try { _settings.SaveLanguage(language); }
-        catch (Exception exception)
-        {
-            await ShowErrorAsync(exception);
-            _rendering = true;
-            LanguageBox.SelectedIndex = _text.IsEnglish ? 1 : 0;
-            _rendering = false;
-            return;
-        }
-        SyncDraft();
-        var selectedId = _vm.Selected?.Id;
-        var alias = _vm.Alias;
-        var description = _vm.Description;
-        var note = _vm.Note;
-        var projects = _vm.Memberships.Where(item => item.IsSelected).Select(item => item.Id).ToHashSet();
-        _text.ChangeLanguage(language);
-        Title = _text["Title"] + " · WinUI 3";
-        Render(_vm.Snapshot, selectedId);
-        _rendering = true;
-        Root.DataContext = null;
-        Root.DataContext = _vm;
-        _vm.Alias = alias;
-        _vm.Description = description;
-        _vm.Note = note;
-        foreach (var membership in _vm.Memberships) membership.IsSelected = projects.Contains(membership.Id);
-        NavigationList.SelectedItem = _vm.Navigation.FirstOrDefault(entry => entry.Id == _vm.NavigationId);
-        ResourceList.SelectedItem = _vm.Selected;
-        ResourceGrid.SelectedItem = _vm.Selected;
-        ApplyPresentation();
-        _vm.Status = _text["Ready"];
-        _rendering = false;
     }
 
     private void Add_Click(object sender, RoutedEventArgs e)
@@ -379,7 +348,8 @@ public sealed partial class MainWindow : Window
     private async void Open_Click(object sender, RoutedEventArgs e)
     {
         var id = _vm.Selected?.Id;
-        if (id != null && await EnsureEditsAsync()) await RunAsync(() => _library.Open(id), "Ready", id);
+        if (id != null && await EnsureEditsAsync())
+            await RunAsync(() => _library.Open(id), "Ready", id, refreshOnFailure: true);
     }
 
     private async void Location_Click(object sender, RoutedEventArgs e)
@@ -390,11 +360,11 @@ public sealed partial class MainWindow : Window
 
     private async void CopyPath_Click(object sender, RoutedEventArgs e)
     {
-        if (_vm.Selected == null) return;
+        if (!_vm.HasSelection) return;
         try
         {
             var data = new DataPackage();
-            data.SetText(_vm.Selected.Target);
+            data.SetText(string.Join(Environment.NewLine, _vm.SelectedRows.Select(row => row.Target)));
             Clipboard.SetContent(data);
             _vm.Status = _text["Copied"];
         }
@@ -419,18 +389,34 @@ public sealed partial class MainWindow : Window
         else if (control && e.Key == VirtualKey.S) { Save_Click(sender, e); e.Handled = true; }
         else if (e.Key == VirtualKey.F5) { Refresh_Click(sender, e); e.Handled = true; }
         else if (e.Key == VirtualKey.Escape && _vm.HasSelection) { ClearSelectionAsync(); e.Handled = true; }
+        else if (control && e.Key == VirtualKey.A && IsResourceFocus()) { SelectAll_Click(sender, e); e.Handled = true; }
+        else if (e.Key == VirtualKey.Delete && IsResourceFocus()) { DeleteResources_Click(sender, e); e.Handled = true; }
         else if (e.Key == VirtualKey.Enter && IsResourceFocus()) { Open_Click(sender, e); e.Handled = true; }
-        else if (e.Key == VirtualKey.F2 && IsResourceFocus() && _vm.HasSelection) { _detailsOpen = true; UpdatePaneWidths(); AliasBox.Focus(FocusState.Keyboard); AliasBox.SelectAll(); e.Handled = true; }
+        else if (e.Key == VirtualKey.F2 && IsResourceFocus() && _vm.HasSingleSelection) { _detailsOpen = true; UpdatePaneWidths(); AliasBox.Focus(FocusState.Keyboard); SelectAliasName(); e.Handled = true; }
     }
 
-    private async void Window_Closing(AppWindow sender, AppWindowClosingEventArgs args)
+    private void RestoreFromTray()
+    {
+        AppWindow.Show();
+        if (AppWindow.Presenter is OverlappedPresenter { State: OverlappedPresenterState.Minimized } presenter)
+            presenter.Restore();
+        Activate();
+        TrayIcon.BringToFront(WinRT.Interop.WindowNative.GetWindowHandle(this));
+    }
+
+    private async Task ExitFromTrayAsync()
+    {
+        RestoreFromTray();
+        if (_vm.IsBusy || _dialogOpen) { _vm.Status = _text["BusyClose"]; return; }
+        if (await EnsureEditsAsync()) { _allowClose = true; Close(); }
+    }
+
+    private void Window_Closing(AppWindow sender, AppWindowClosingEventArgs args)
     {
         if (_allowClose) return;
-        _searchTimer.Stop();
-        if (_vm.IsBusy || _dialogOpen) { args.Cancel = true; _vm.Status = _text["BusyClose"]; return; }
-        SyncDraft();
-        if (!_vm.IsDirty) return;
+        // Hiding keeps the current draft, dialogs, and in-flight operations alive.
         args.Cancel = true;
-        if (await EnsureEditsAsync()) { _allowClose = true; Close(); }
+        SyncDraft();
+        sender.Hide();
     }
 }

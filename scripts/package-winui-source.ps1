@@ -1,5 +1,5 @@
 [CmdletBinding()]
-param()
+param([switch]$KeepPrevious)
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -58,7 +58,7 @@ Assert-DistPath -Path $temporaryArchive
 
 $sourcePaths = [System.Collections.Generic.List[string]]::new()
 $rootFiles = @(
-    'README.md', 'README.en.md', 'THIRD-PARTY-NOTICES.md', 'LocalResourceLibrary.WinUI.slnx',
+    'AGENTS.md', 'README.md', 'README.en.md', 'THIRD-PARTY-NOTICES.md', 'LocalResourceLibrary.WinUI.slnx',
     '.gitignore', '.gitattributes', '.editorconfig', 'global.json', 'NuGet.config',
     'Directory.Build.props', 'Directory.Build.targets', 'Directory.Packages.props',
     'LICENSE', 'LICENSE.md', 'LICENSE.txt'
@@ -129,12 +129,17 @@ try {
 }
 finally { $readback.Dispose() }
 
+$previousArchive = $null
 if (Test-Path -LiteralPath $archivePath) {
     $previousArchive = [System.IO.Path]::GetFullPath((Join-Path $distRoot ('.previous-winui-source-' + $runSuffix + '.zip')))
     Assert-DistPath -Path $previousArchive
     Move-Item -LiteralPath $archivePath -Destination $previousArchive
-    Write-Host "Previous source archive retained at $previousArchive"
 }
 Move-Item -LiteralPath $temporaryArchive -Destination $archivePath
+if ($previousArchive -and -not $KeepPrevious) {
+    Assert-DistPath -Path $previousArchive
+    Remove-Item -LiteralPath $previousArchive -Force
+}
+if ($previousArchive -and $KeepPrevious) { Write-Host "Previous source archive retained at $previousArchive" }
 Write-Host "Source archive: $archivePath"
 Write-Host "Included $($relativePaths.Count) files with a stable order and entry timestamps."

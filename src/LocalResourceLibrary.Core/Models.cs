@@ -14,7 +14,8 @@ public record ResourceItem(
     DateTimeOffset? LastOpenedAt,
     long OpenCount,
     bool IsMissing,
-    IReadOnlyList<Project> Projects)
+    IReadOnlyList<Project> Projects,
+    FileIdentity? FileIdentity = null)
 {
     public string RealName => Path.GetFileName(Path.TrimEndingDirectorySeparator(Target)) is { Length: > 0 } name
         ? name : Target;

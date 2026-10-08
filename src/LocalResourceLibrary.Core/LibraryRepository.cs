@@ -22,7 +22,7 @@ internal sealed class LibraryRepository
         using var connection = Connect();
         using var versionCommand = Command(connection, null, "PRAGMA user_version;");
         var version = Convert.ToInt32(versionCommand.ExecuteScalar(), CultureInfo.InvariantCulture);
-        if (version > 1) throw new NotSupportedException("数据库来自较新版本，请使用较新版本的应用打开。");
+        if (version > 2) throw new NotSupportedException("数据库来自较新版本，请使用较新版本的应用打开。");
         using var transaction = connection.BeginTransaction();
         Execute(connection, transaction, """
             CREATE TABLE IF NOT EXISTS Item (
@@ -50,8 +50,15 @@ internal sealed class LibraryRepository
                 PRIMARY KEY (project_id, item_id)
             );
             CREATE INDEX IF NOT EXISTS ix_ProjectItem_item ON ProjectItem(item_id);
-            PRAGMA user_version = 1;
             """);
+        if (version < 2)
+        {
+            Execute(connection, transaction, """
+                ALTER TABLE Item ADD COLUMN volume_id TEXT;
+                ALTER TABLE Item ADD COLUMN file_id TEXT;
+                PRAGMA user_version = 2;
+                """);
+        }
         transaction.Commit();
     }
 
@@ -106,7 +113,7 @@ internal sealed class LibraryRepository
         }
         var items = new List<ResourceItem>();
         using (var command = Command(connection, transaction,
-                   "SELECT id,type,target,alias,description,note,created_at,updated_at,last_opened_at,open_count FROM Item ORDER BY created_at DESC;"))
+                   "SELECT id,type,target,alias,description,note,created_at,updated_at,last_opened_at,open_count,volume_id,file_id FROM Item ORDER BY created_at DESC;"))
         using (var reader = command.ExecuteReader())
         {
             while (reader.Read())
@@ -116,7 +123,8 @@ internal sealed class LibraryRepository
                     ? list.OrderBy(project => project.Name, StringComparer.OrdinalIgnoreCase).ToArray() : [];
                 items.Add(new ResourceItem(itemId, reader.GetString(1), reader.GetString(2), reader.GetString(3),
                     reader.GetString(4), reader.GetString(5), ReadTime(reader.GetString(6)), ReadTime(reader.GetString(7)),
-                    reader.IsDBNull(8) ? null : ReadTime(reader.GetString(8)), reader.GetInt64(9), false, itemProjects));
+                    reader.IsDBNull(8) ? null : ReadTime(reader.GetString(8)), reader.GetInt64(9), false, itemProjects,
+                    reader.IsDBNull(10) || reader.IsDBNull(11) ? null : new FileIdentity(reader.GetString(10), reader.GetString(11))));
             }
         }
         return new LibrarySnapshot(items, projects);

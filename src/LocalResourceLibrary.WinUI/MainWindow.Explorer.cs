@@ -171,8 +171,7 @@ public sealed partial class MainWindow
             change();
             if (reorder) _vm.Reorder();
             ApplyPresentation();
-            ResourceList.SelectedItem = _vm.Selected;
-            ResourceGrid.SelectedItem = _vm.Selected;
+            SyncResourceSelection();
         }
         catch (Exception exception) { error = exception; }
         finally { _rendering = false; }
@@ -181,7 +180,7 @@ public sealed partial class MainWindow
 
     private void Details_Click(object sender, RoutedEventArgs e)
     {
-        if (!_vm.HasSelection) return;
+        if (!_vm.HasSingleSelection) return;
         _detailsOpen = !_detailsOpen;
         UpdatePaneWidths();
     }
@@ -192,7 +191,7 @@ public sealed partial class MainWindow
     private void UpdatePaneWidths()
     {
         if (!_explorerInitialized || Body.ActualWidth <= 0) return;
-        var showDetails = _detailsOpen && _vm.HasSelection;
+        var showDetails = _detailsOpen && _vm.HasSingleSelection;
         var navigationMax = Math.Max(160, Math.Min(480, Body.ActualWidth - 312 - (showDetails ? 280 : 0)));
         var navigation = Math.Clamp(_navigationWidth, 160, navigationMax);
         NavigationColumn.Width = new GridLength(navigation);
@@ -236,7 +235,7 @@ public sealed partial class MainWindow
     {
         if (!_vm.HasSelection || !await EnsureEditsAsync()) return;
         _rendering = true;
-        try { _vm.Select(null); ResourceList.SelectedItem = ResourceGrid.SelectedItem = null; _detailsOpen = false; UpdatePaneWidths(); }
+        try { _vm.Select(null); SyncResourceSelection(); _detailsOpen = false; UpdatePaneWidths(); }
         finally { _rendering = false; }
     }
 

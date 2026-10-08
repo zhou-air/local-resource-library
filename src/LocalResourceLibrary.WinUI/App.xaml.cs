@@ -34,17 +34,17 @@ public partial class App : Application
             _mutex = new Mutex(true, "Local\\LocalResourceLibrary-" + key, out _ownsMutex);
             if (!_ownsMutex)
             {
-                ShowStartupMessage("此资源库已在运行。请关闭已打开的资源库后再试。\n" +
-                    "This library is already open. Close the existing library before trying this version.");
+                if (!TrayIcon.TryRestoreExisting(key))
+                    ShowStartupMessage("此资源库已在运行，请从已打开的窗口或右下角托盘打开。\n" +
+                        "This library is already running. Open its window or its notification-area icon.");
                 ReleaseLibraryLock();
                 Exit();
                 return;
             }
 
-            var settings = new SettingsStore(dataDirectory);
-            var text = new Localizer(settings.Language);
+            var text = new Localizer(SettingsStore.GetSystemLanguage());
             var service = new LibraryService(Path.Combine(dataDirectory, "library.db"));
-            _window = new MainWindow(service, text, settings);
+            _window = new MainWindow(service, text, key);
             _window.Closed += (_, _) => ReleaseLibraryLock();
             _window.Activate();
         }
