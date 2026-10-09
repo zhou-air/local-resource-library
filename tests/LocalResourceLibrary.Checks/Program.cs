@@ -3,13 +3,19 @@ using Microsoft.Data.Sqlite;
 
 namespace LocalResourceLibrary.Checks;
 
-internal static class Program
+internal static partial class Program
 {
     private static int Main()
     {
         (string Name, Action Run)[] checks =
         [
             ("Project pinning and grouped ordering survive restart and reject cross-group moves", ProjectOrdering),
+            ("Project groups preserve project identity and resources through deletion", ProjectGroupLifecycle),
+            ("Project colors and permanent IDs survive patches and reject invalid writes", ProjectColorsAndIdentity),
+            ("Group ordering and cross-group project moves preserve independent pinned ordering", ProjectGroupOrdering),
+            ("Group deletion and ordering roll back every write on database failure", ProjectGroupRollback),
+            ("Real version-one, three and four databases migrate without losing user data", ProjectGroupMigration),
+            ("Schema migration failures roll back all earlier migration steps", ProjectGroupMigrationRollback),
             ("Adding files and folders stores references only", AddReferences),
             ("Canonical paths share one item across projects", CanonicalDeduplication),
             ("Alias, description, and note preserve the physical resource", EditContext),
@@ -82,12 +88,20 @@ internal static class Program
 
     private static void ProjectOrdering()
     {
-        using var fixture = new Fixture();
+        using var fixture = new Fixture(beforeInitialize: setup =>
+        {
+            setup.CreateLegacyDatabase([]);
+            setup.ExecuteSql("""
+                DELETE FROM Project;
+                INSERT INTO Project VALUES('legacy-b','Legacy B','LEGACY B','');
+                INSERT INTO Project VALUES('legacy-a','Legacy A','LEGACY A','');
+                ALTER TABLE Item ADD COLUMN volume_id TEXT;
+                ALTER TABLE Item ADD COLUMN file_id TEXT;
+                ALTER TABLE Item ADD COLUMN favicon BLOB;
+                PRAGMA user_version=3;
+                """);
+        });
         var library = fixture.Library;
-        library.CreateProject("Legacy B");
-        library.CreateProject("Legacy A");
-        fixture.ExecuteSql("ALTER TABLE Project DROP COLUMN is_pinned; ALTER TABLE Project DROP COLUMN sort_order; PRAGMA user_version=3;");
-        library = new LibraryService(fixture.DatabasePath, fixture.Platform);
         Equal("Legacy A,Legacy B", string.Join(",", library.GetSnapshot(false).Projects.Select(p => p.Name)), "Migration preserves alphabetical order.");
         Equal(0, library.GetSnapshot(false).Projects.Count(p => p.IsPinned), "Migration leaves projects unpinned.");
         foreach (var project in library.GetSnapshot(false).Projects) library.DeleteProject(project.Id);
@@ -888,7 +902,7 @@ internal static class Program
         Equal(existingPath, identities.GetPaths.Single(), "Backfill must inspect only the accessible legacy file.");
         Throws(() => fixture.Library.Open(missing.Id), "An unidentified missing legacy file must require explicit repair.");
         Equal(0, identities.ResolveIdentities.Count, "Missing legacy files must not invoke identity recovery.");
-        Equal(4L, Convert.ToInt64(fixture.SqlScalar("PRAGMA user_version;")), "The database must migrate to schema version four.");
+        Equal(5L, Convert.ToInt64(fixture.SqlScalar("PRAGMA user_version;")), "The database must migrate to schema version five.");
         Require(checkedSnapshot.Items.All(item => item.Favicon is null), "Migration must leave physical resources without website icons.");
         var reopened = new LibraryService(fixture.DatabasePath, fixture.Platform, identities).GetSnapshot(checkPaths: false);
         Equal(identity, reopened.Items.Single(item => item.Id == before.Id).FileIdentity, "Legacy backfill must persist across restart.");
@@ -1201,7 +1215,7 @@ internal static class Program
                 """);
         });
         var migrated = fixture.Library.GetSnapshot(checkPaths: false);
-        Equal(4L, Convert.ToInt64(fixture.SqlScalar("PRAGMA user_version;")), "Version-two databases must migrate to version four.");
+        Equal(5L, Convert.ToInt64(fixture.SqlScalar("PRAGMA user_version;")), "Version-two databases must migrate to version five.");
         Equal(2, migrated.Items.Count, "Migration must preserve all file and folder records.");
         var physicalFile = migrated.Items.Single(item => item.Type == "file");
         var physicalFolder = migrated.Items.Single(item => item.Type == "folder");
@@ -1224,10 +1238,10 @@ internal static class Program
         Equal(0, identities.GetPaths.Count, "Migration must not inspect or recapture physical identity.");
         fixture.Library.AddUrl("https://example.test/migrated", "New URL", "", "", ["legacy-project"]);
         Equal(3, fixture.Library.GetSnapshot(checkPaths: false).Items.Count, "Migrated databases must support URLs alongside existing resources.");
-        fixture.ExecuteSql("PRAGMA user_version=5;");
+        fixture.ExecuteSql("PRAGMA user_version=6;");
         Throws(() => new LibraryService(fixture.DatabasePath, fixture.Platform), "A future database schema must be rejected without downgrade.");
-        Equal(5L, Convert.ToInt64(fixture.SqlScalar("PRAGMA user_version;")), "Rejecting a future schema must not change its version.");
-        fixture.ExecuteSql("PRAGMA user_version=4;");
+        Equal(6L, Convert.ToInt64(fixture.SqlScalar("PRAGMA user_version;")), "Rejecting a future schema must not change its version.");
+        fixture.ExecuteSql("PRAGMA user_version=5;");
     }
 
     private static void UrlInputValidation()

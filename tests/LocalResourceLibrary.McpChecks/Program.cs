@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Text.Json;
 using LocalResourceLibrary.Core;
 using LocalResourceLibrary.Mcp;
+using Microsoft.Data.Sqlite;
 using ModelContextProtocol;
 using ModelContextProtocol.Client;
 using ModelContextProtocol.Protocol;
@@ -22,6 +23,7 @@ internal static class Program
             var server = FindServer(args);
             await ProtocolOutput(server, Path.Combine(root, "protocol"));
             await Integration(server, root);
+            await ResourceReferences(server, root);
             PreviewTokenLifetime();
             Console.WriteLine($"PASS: {assertions} MCP assertions; real stdio child processes, isolated SQLite, no WinUI launch.");
             return 0;
@@ -121,7 +123,9 @@ internal static class Program
         await using var client = await Connect(server, dataDirectory);
         var tools = await client.ListToolsAsync(cancellationToken: Deadline.Token);
         string[] expected = ["search_resources", "get_resource", "list_projects", "list_project_resources", "add_resource", "update_resource",
-            "create_project", "update_project", "set_resource_projects", "preview_resource_updates", "commit_resource_updates"];
+            "create_project", "update_project", "delete_project", "move_project", "list_project_groups", "create_project_group", "update_project_group",
+            "delete_project_group", "move_project_group", "set_resource_projects", "set_resources_projects", "copy_resources_to_project",
+            "move_resources_to_project", "import_resources", "preview_resource_updates", "commit_resource_updates"];
         Assert(tools.Select(tool => tool.Name).Order().SequenceEqual(expected.Order()), "server exposes exactly the scoped tools; no file deletion, execution, scanning, or parsing tools");
         foreach (var name in expected)
         {
@@ -131,7 +135,7 @@ internal static class Program
             Assert(schema.GetProperty("type").GetString() == "object", $"{name} advertises an object input schema");
             Assert(tool.Annotations != null && tool.Annotations.OpenWorldHint == false, $"{name} declares its local scope");
         }
-        foreach (var name in new[] { "search_resources", "list_projects", "list_project_resources", "preview_resource_updates" })
+        foreach (var name in new[] { "search_resources", "list_projects", "list_project_groups", "list_project_resources", "preview_resource_updates" })
             Assert(tools.Single(tool => tool.Name == name).ProtocolTool.Annotations?.ReadOnlyHint == true, $"{name} is marked read-only");
         Assert(tools.Single(tool => tool.Name == "get_resource").ProtocolTool.Annotations?.ReadOnlyHint == false,
             "get_resource accurately declares possible file-identity recovery writes");
@@ -140,6 +144,12 @@ internal static class Program
         var updateSchema = JsonSerializer.SerializeToElement(tools.Single(tool => tool.Name == "update_resource").ProtocolTool.InputSchema);
         Assert(updateSchema.GetProperty("properties").TryGetProperty("item_id", out _) && updateSchema.GetProperty("properties").TryGetProperty("description", out _),
             "tool schema uses the documented snake_case inputs");
+        foreach (var name in new[] { "create_project", "update_project", "create_project_group", "update_project_group" })
+        {
+            var properties = JsonSerializer.SerializeToElement(tools.Single(tool => tool.Name == name).ProtocolTool.InputSchema).GetProperty("properties");
+            Assert(!properties.TryGetProperty("id", out _) && !properties.TryGetProperty("new_id", out _) && !properties.TryGetProperty("new_project_id", out _) && !properties.TryGetProperty("new_group_id", out _),
+                $"{name} offers no permanent ID assignment or replacement input");
+        }
 
         Assert(Items(await Ok(client, "search_resources")).Length == 0, "fresh isolated library is empty without WinUI");
         var projectA = (await Ok(client, "create_project", ("name", "PDMS project-needle"), ("description", "Original project description"))).GetProperty("project");
@@ -217,6 +227,7 @@ internal static class Program
         var described = (await Ok(client, "update_project", ("project_id", idA), ("description", "New project description"))).GetProperty("project");
         Assert(String(described, "name") == "PDMS Renamed", "project description patch preserves omitted name");
         Assert(Items(await Ok(client, "list_project_resources", ("project_id", idA))).Length == 2, "project edits preserve resource memberships");
+        await ProjectOrganization(server, client, dataDirectory, idA, idB, urlId);
 
         foreach (var arguments in new[] { Args(("type", "bad")), Args(("limit", 0)), Args(("limit", 1001)), Args(("offset", -1)), Args(("project_id", "missing")) })
             await Error(client, "search_resources", arguments);
@@ -247,6 +258,201 @@ internal static class Program
         Assert((await Ok(reopened, "get_resource", ("item_id", urlId))).GetProperty("item").GetProperty("note").GetString() == "patched URL note", "a newly started server sees persisted metadata");
         Assert(File.Exists(Path.Combine(folder + "-moved", "unindexed-child.txt")), "MCP never deletes or copies original folder contents");
         Assert(await File.ReadAllTextAsync(Path.Combine(root, "renamed-resource.txt"), Deadline.Token) == "Source file stays unchanged. 内容由 Agent 自己读取。", "MCP never edits the source file content");
+    }
+
+    private static async Task ResourceReferences(string server, string root)
+    {
+        var dataDirectory = Path.Combine(root, "resource-references");
+        var file = Path.Combine(root, "reference 中文.txt");
+        var folder = Path.Combine(root, "reference folder");
+        var child = Path.Combine(folder, "unindexed.txt");
+        Directory.CreateDirectory(folder);
+        await File.WriteAllTextAsync(file, "Original reference file remains in place.", Deadline.Token);
+        await File.WriteAllTextAsync(child, "No recursive indexing.", Deadline.Token);
+        const string url = "https://example.invalid/reference?clipboard=1#part";
+        await using var client = await Connect(server, dataDirectory);
+        var group = Id((await Ok(client, "create_project_group", ("name", "Drop group"))).GetProperty("group"));
+        var source = Id((await Ok(client, "create_project", ("name", "Source"))).GetProperty("project"));
+        var target = Id((await Ok(client, "create_project", ("name", "Grouped target"), ("group_id", group))).GetProperty("project"));
+        var other = Id((await Ok(client, "create_project", ("name", "Ungrouped target"))).GetProperty("project"));
+        var imported = await Ok(client, "import_resources", ("targets", new[] { file, folder, url }), ("project_id", source));
+        var ids = Items(imported).Select(Id).ToArray();
+        Assert(imported.GetProperty("added").GetInt32() == 3 && ids.Distinct().Count() == 3, "MCP mixed import atomically creates one Item per file, folder and URL");
+        Assert(Items(await Ok(client, "search_resources")).Length == 3, "batch import does not scan folder contents");
+        await Ok(client, "set_resources_projects", ("item_ids", ids), ("add_project_ids", new[] { other }));
+        var before = Items(await Ok(client, "search_resources")).ToDictionary(Id);
+        var copied = await Ok(client, "copy_resources_to_project", ("item_ids", ids), ("target_project_id", target));
+        Assert(copied.GetProperty("added_memberships").GetInt32() == 3 && copied.GetProperty("removed_memberships").GetInt32() == 0, "MCP copy adds all target associations in one transaction");
+        foreach (var item in Items(await Ok(client, "search_resources")))
+            Assert(Projects(item).ToHashSet().SetEquals(new[] { source, target, other }), "copy retains source and every other project membership");
+        Assert((await Ok(client, "copy_resources_to_project", ("item_ids", ids.Concat(ids).ToArray()), ("target_project_id", target)))
+            .GetProperty("added_memberships").GetInt32() == 0, "duplicate copied IDs and existing target references do not duplicate associations");
+        var moved = await Ok(client, "move_resources_to_project", ("item_ids", ids), ("source_project_id", source), ("target_project_id", target));
+        Assert(moved.GetProperty("removed_memberships").GetInt32() == 3, "MCP move removes only selected source associations");
+        foreach (var item in Items(await Ok(client, "search_resources")))
+            Assert(Projects(item).ToHashSet().SetEquals(new[] { target, other }), "MCP move preserves unrelated memberships");
+        await Ok(client, "move_resources_to_project", ("item_ids", ids), ("target_project_id", source));
+        foreach (var item in Items(await Ok(client, "search_resources")))
+            Assert(Projects(item).ToHashSet().SetEquals(new[] { source, target, other }), "MCP move from All Resources only adds target");
+        Assert((await Ok(client, "move_resources_to_project", ("item_ids", ids), ("source_project_id", source), ("target_project_id", source)))
+            .GetProperty("removed_memberships").GetInt32() == 0, "MCP same-project move is a no-op");
+        await Ok(client, "set_resources_projects", ("item_ids", ids), ("remove_project_ids", new[] { target }));
+        await Error(client, "set_resources_projects", ("item_ids", new[] { ids[0], "stale-item" }), ("add_project_ids", new[] { target }), ("remove_project_ids", new[] { source }));
+        await Error(client, "copy_resources_to_project", ("item_ids", ids), ("target_project_id", group));
+        await Error(client, "move_resources_to_project", ("item_ids", ids), ("source_project_id", "stale-project"), ("target_project_id", target));
+        await Error(client, "set_resources_projects", ("item_ids", ids), ("add_project_ids", new[] { source }), ("remove_project_ids", new[] { source }));
+        await Error(client, "copy_resources_to_project", ("item_ids", Array.Empty<string>()), ("target_project_id", target));
+        await Error(client, "set_resources_projects", ("item_ids", ids));
+        foreach (var item in Items(await Ok(client, "search_resources")))
+            Assert(Projects(item).ToHashSet().SetEquals(new[] { source, other }), "invalid IDs and ambiguous group target leave whole membership batch intact");
+
+        var database = Path.Combine(dataDirectory, "library.db");
+        using (var connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = database, ForeignKeys = true }.ToString()))
+        {
+            connection.Open();
+            using var command = connection.CreateCommand();
+            command.CommandText = $"CREATE TRIGGER fail_mcp_reference BEFORE INSERT ON ProjectItem WHEN NEW.project_id='{target}' AND NEW.item_id='{ids[1]}' BEGIN SELECT RAISE(ABORT,'injected reference failure'); END;";
+            command.ExecuteNonQuery();
+        }
+        await Error(client, "move_resources_to_project", ("item_ids", ids), ("source_project_id", source), ("target_project_id", target));
+        foreach (var item in Items(await Ok(client, "search_resources")))
+            Assert(Projects(item).ToHashSet().SetEquals(new[] { source, other }), "second-item SQLite error rolls back prior copy and source removal");
+        var newUrl = "https://example.invalid/should-rollback";
+        await Error(client, "import_resources", ("targets", new[] { newUrl, Path.Combine(root, "missing-reference.txt") }), ("project_id", source));
+        Assert(!Items(await Ok(client, "search_resources")).Any(item => String(item, "target") == newUrl), "invalid mixed import rolls back earlier new URL");
+        var repeated = await Ok(client, "import_resources", ("targets", new[] { file, folder, url }), ("project_id", source));
+        Assert(repeated.GetProperty("added").GetInt32() == 0 && repeated.GetProperty("added_memberships").GetInt32() == 0, "repeated MCP paste reuses permanent Item IDs and associations");
+        foreach (var id in ids)
+        {
+            var after = (await Ok(client, "get_resource", ("item_id", id), ("resolve_path", false))).GetProperty("item");
+            Assert(String(after, "target") == String(before[id], "target") && JsonElement.DeepEquals(after.GetProperty("file_identity"), before[id].GetProperty("file_identity")), "MCP reference operations preserve Item ID, path and File ID");
+        }
+        var service = new LibraryService(database) { EnableHistory = true };
+        service.RemoveItemsFromProject(ids, other);
+        await Ok(client, "set_resources_projects", ("item_ids", ids), ("add_project_ids", new[] { other }));
+        var undo = service.Undo();
+        Assert(undo.Conflict && !undo.Applied, "MCP writes are detected by the shared Core undo conflict guard");
+        service.RemoveItemsFromProject(ids, other);
+        await Ok(client, "set_resources_projects", ("item_ids", ids), ("add_project_ids", new[] { other }));
+        await Ok(client, "set_resources_projects", ("item_ids", ids), ("remove_project_ids", new[] { other }));
+        undo = service.Undo();
+        Assert(undo.Conflict && !undo.Applied && ids.All(id => !service.GetResource(id, false).Projects.Any(project => project.Id == other)), "MCP add/remove returning to absent still rejects stale membership undo");
+        service.TransferResources(ids, other);
+        await Ok(client, "set_resources_projects", ("item_ids", ids), ("remove_project_ids", new[] { other }));
+        await Ok(client, "set_resources_projects", ("item_ids", ids), ("add_project_ids", new[] { other }));
+        undo = service.Undo();
+        Assert(undo.Conflict && !undo.Applied && ids.All(id => service.GetResource(id, false).Projects.Any(project => project.Id == other)), "MCP remove/re-add returning to present retains externally replaced relations");
+        Assert(File.ReadAllText(file) == "Original reference file remains in place." && File.ReadAllText(child) == "No recursive indexing.", "MCP clipboard/reference tools leave source files and folder contents unchanged");
+    }
+
+    private static async Task ProjectOrganization(string server, McpClient client, string dataDirectory, string idA, string idB, string resourceId)
+    {
+        var lookup = await Ok(client, "list_projects", ("project_id", idA));
+        var project = lookup.GetProperty("projects").EnumerateArray().Single();
+        Assert(Id(project) == idA && String(project, "name") == "PDMS Renamed", "old permanent ID resolves the same project after renaming");
+        Assert(String(project, "color") == "default" && project.GetProperty("group_id").ValueKind == JsonValueKind.Null, "legacy create_project signature returns default color and ungrouped metadata");
+        var candidates = await Ok(client, "list_projects", ("name", "r"));
+        Assert(candidates.GetProperty("ambiguous").GetBoolean() && candidates.GetProperty("projects").GetArrayLength() == 2,
+            "name lookup returns all candidates with an ambiguity flag instead of selecting one");
+        Assert((await Ok(client, "list_projects", ("name", "pdms renamed"))).GetProperty("projects").GetArrayLength() == 1,
+            "project name lookup is case-insensitive and supports full display names");
+        await Error(client, "list_projects", ("project_id", "PDMS Renamed"));
+        await Error(client, "update_project", ("project_id", "PDMS Renamed"), ("description", "must not apply"));
+        await Error(client, "set_resource_projects", ("item_id", resourceId), ("add_project_ids", new[] { "PDMS Renamed" }));
+
+        var work = (await Ok(client, "create_project_group", ("name", "MCP Work"))).GetProperty("group");
+        var reference = (await Ok(client, "create_project_group", ("name", "MCP Reference"))).GetProperty("group");
+        var workId = Id(work);
+        var referenceId = Id(reference);
+        Assert(Guid.TryParse(workId, out _) && Guid.TryParse(referenceId, out _) && workId != referenceId, "group creation generates distinct permanent UUIDs");
+        var groupCandidates = await Ok(client, "list_project_groups", ("name", "mcp"));
+        Assert(groupCandidates.GetProperty("ambiguous").GetBoolean() && groupCandidates.GetProperty("groups").GetArrayLength() == 2, "group name lookup returns all matching candidates");
+        await Error(client, "create_project_group", ("name", "mcp work"));
+        await Error(client, "list_project_groups", ("group_id", "missing-group"));
+        await Error(client, "update_project_group", ("group_id", "MCP Work"), ("name", "must not apply"));
+        await Error(client, "create_project", ("name", "Invalid Color"), ("color", "neon"));
+        await Error(client, "create_project", ("name", "Invalid Group"), ("group_id", "missing-group"));
+        Assert((await Ok(client, "list_projects")).GetProperty("projects").GetArrayLength() == 2, "invalid project creation leaves no partial records");
+        var groupedCreate = (await Ok(client, "create_project", ("name", "Grouped Create"), ("color", "blue"), ("group_id", workId))).GetProperty("project");
+        Assert(String(groupedCreate, "color") == "blue" && String(groupedCreate, "group_id") == workId, "project creation accepts an existing group and preset color");
+        await Ok(client, "delete_project", ("project_id", Id(groupedCreate)));
+
+        project = (await Ok(client, "update_project", ("project_id", idA), ("color", "purple"), ("group_id", workId))).GetProperty("project");
+        Assert(Id(project) == idA && String(project, "color") == "purple" && String(project, "group_id") == workId, "color and group patch preserves project identity");
+        var grouped = await Ok(client, "list_projects", ("group_id", workId));
+        Assert(grouped.GetProperty("projects").EnumerateArray().Select(Id).SequenceEqual(new[] { idA }) && grouped.GetProperty("project_groups").GetArrayLength() == 2,
+            "group-filtered project query includes stable IDs and group metadata");
+        Assert((await Ok(client, "list_projects", ("ungrouped", true))).GetProperty("projects").EnumerateArray().Select(Id).SequenceEqual(new[] { idB }), "ungrouped filter finds projects without a group");
+        await Error(client, "list_projects", ("group_id", workId), ("ungrouped", true));
+        await Error(client, "update_project", ("project_id", idA), ("color", "neon"));
+        await Error(client, "update_project", ("project_id", idA), ("group_id", "missing-group"));
+        await Error(client, "update_project", ("project_id", idA), ("group_id", workId), ("clear_group", true));
+        var resource = (await Ok(client, "get_resource", ("item_id", resourceId), ("resolve_path", false))).GetProperty("item");
+        var resourceProject = resource.GetProperty("projects").EnumerateArray().Single(item => Id(item) == idA);
+        Assert(String(resourceProject, "color") == "purple" && String(resourceProject, "group_id") == workId && Projects(resource).Length == 2,
+            "resource membership metadata reflects colors and groups without changing many-to-many links");
+
+        var renamedGroup = (await Ok(client, "update_project_group", ("group_id", workId), ("name", "MCP Work Renamed"))).GetProperty("group");
+        Assert(Id(renamedGroup) == workId && String(renamedGroup, "name") == "MCP Work Renamed", "group rename preserves its permanent ID");
+        await using (var reopened = await Connect(server, dataDirectory))
+        {
+            var persisted = (await Ok(reopened, "list_projects", ("project_id", idA))).GetProperty("projects").EnumerateArray().Single();
+            var persistedGroup = (await Ok(reopened, "list_project_groups", ("group_id", workId))).GetProperty("groups").EnumerateArray().Single();
+            Assert(Id(persisted) == idA && String(persisted, "color") == "purple" && String(persisted, "group_id") == workId && String(persistedGroup, "name") == "MCP Work Renamed",
+                "new MCP process reads persistent project/group IDs, color and group membership");
+        }
+        var orderedGroups = await Ok(client, "move_project_group", ("group_id", workId), ("target_group_id", referenceId), ("after", true));
+        Assert(orderedGroups.GetProperty("groups").EnumerateArray().Select(Id).SequenceEqual(new[] { referenceId, workId }), "groups can be sorted separately by permanent IDs");
+        await Ok(client, "update_project", ("project_id", idB), ("group_id", referenceId));
+        project = (await Ok(client, "move_project", ("project_id", idA), ("target_project_id", idB), ("after", true))).GetProperty("project");
+        Assert(Id(project) == idA && String(project, "group_id") == referenceId, "ordering an unpinned project into another group adopts the target group");
+        Assert((await Ok(client, "list_projects", ("group_id", referenceId))).GetProperty("projects").EnumerateArray().Select(Id).SequenceEqual(new[] { idB, idA }),
+            "project sorting places the source after its target within the destination group");
+        var service = new LibraryService(Path.Combine(dataDirectory, "library.db"));
+        await Ok(client, "update_project", ("project_id", idA), ("group_id", workId));
+        service.SetProjectPinned(idA, true);
+        service.SetProjectPinned(idB, true);
+        project = (await Ok(client, "move_project", ("project_id", idA), ("target_project_id", idB))).GetProperty("project");
+        Assert(project.GetProperty("is_pinned").GetBoolean() && String(project, "group_id") == workId, "sorting in the independent pinned area preserves project group and pin state");
+        Assert((await Ok(client, "list_projects")).GetProperty("projects").EnumerateArray().Select(Id).SequenceEqual(new[] { idA, idB }),
+            "pinned projects sort globally across their assigned groups");
+        service.SetProjectPinned(idB, false);
+        await Error(client, "move_project", ("project_id", idA), ("target_project_id", idB));
+        service.SetProjectPinned(idA, false);
+        await Error(client, "move_project", ("project_id", "missing"), ("target_project_id", idB));
+        await Error(client, "move_project_group", ("group_id", "missing"), ("target_group_id", workId));
+        await Error(client, "delete_project_group", ("group_id", "missing"));
+
+        var beforeMembership = Projects((await Ok(client, "get_resource", ("item_id", resourceId), ("resolve_path", false))).GetProperty("item")).Order().ToArray();
+        await Ok(client, "delete_project_group", ("group_id", workId));
+        project = (await Ok(client, "list_projects", ("project_id", idA))).GetProperty("projects").EnumerateArray().Single();
+        Assert(Id(project) == idA && String(project, "color") == "purple" && project.GetProperty("group_id").ValueKind == JsonValueKind.Null,
+            "group deletion retains projects and colors while moving projects to ungrouped");
+        Assert(Projects((await Ok(client, "get_resource", ("item_id", resourceId), ("resolve_path", false))).GetProperty("item")).Order().SequenceEqual(beforeMembership),
+            "group deletion leaves resources and all project memberships intact");
+        await Error(client, "list_project_groups", ("group_id", workId));
+        await Error(client, "update_project_group", ("group_id", workId), ("name", "stale"));
+        var replacementGroup = (await Ok(client, "create_project_group", ("name", "MCP Work Renamed"))).GetProperty("group");
+        Assert(Id(replacementGroup) != workId, "recreating a deleted group name generates a new ID");
+        await Ok(client, "delete_project_group", ("group_id", Id(replacementGroup)));
+        await Ok(client, "update_project", ("project_id", idB), ("clear_group", true));
+        Assert((await Ok(client, "list_projects", ("project_id", idB))).GetProperty("projects").EnumerateArray().Single().GetProperty("group_id").ValueKind == JsonValueKind.Null,
+            "clear_group explicitly removes a project's group");
+        await Ok(client, "delete_project_group", ("group_id", referenceId));
+        Assert((await Ok(client, "list_project_groups")).GetProperty("groups").GetArrayLength() == 0, "group deletion removes only the selected group records");
+
+        var transient = (await Ok(client, "create_project", ("name", "Transient Project"), ("color", "teal"))).GetProperty("project");
+        var transientId = Id(transient);
+        await Ok(client, "set_resource_projects", ("item_id", resourceId), ("add_project_ids", new[] { transientId }));
+        await Ok(client, "delete_project", ("project_id", transientId));
+        Assert(Projects((await Ok(client, "get_resource", ("item_id", resourceId), ("resolve_path", false))).GetProperty("item")).Order().SequenceEqual(beforeMembership),
+            "project deletion keeps the resource and its other project memberships");
+        await Error(client, "delete_project", ("project_id", transientId));
+        await Error(client, "list_projects", ("project_id", transientId));
+        await Error(client, "update_project", ("project_id", transientId), ("name", "stale"));
+        var replacement = (await Ok(client, "create_project", ("name", "Transient Project"))).GetProperty("project");
+        Assert(Guid.TryParse(transientId, out _) && Id(replacement) != transientId, "recreating a deleted project name generates a new ID");
+        await Ok(client, "delete_project", ("project_id", Id(replacement)));
     }
 
     private static async Task Batch(string server, string dataDirectory, McpClient client, LibraryService service, string fileId, string folderId)

@@ -13,6 +13,7 @@ internal static class Program
         (string Name, Action Run)[] checks =
         [
             ("Project navigation preserves stored order and exposes pin state", ProjectNavigation),
+            ("Groups separate pins, preserve project identity and remember collapse by group ID", GroupNavigation),
             ("Alias defaults to original name without creating unsaved changes", AliasDefault),
             ("System display language selects Chinese or English fallback", SystemLanguage),
             ("Details defaults to hidden and follows selection", Selection),
@@ -52,12 +53,77 @@ internal static class Program
         using var fixture = new Fixture();
         var vm = fixture.Model;
         vm.Load(new([], [new Project("z", "Z", "", true, 0), new Project("a", "A", "", true, 1), new Project("c", "C", "", false, 0), new Project("b", "B", "", false, 1)]));
-        Equal("@all,@recent,@missing,z,a,c,b", string.Join(",", vm.Navigation.Select(p => p.Id)));
-        Equal(true, vm.Navigation[3].IsPinned);
-        Equal(false, vm.Navigation[5].IsPinned);
+        Equal("@all,@recent,@missing,@pinned,z,a,@unassigned,c,b", string.Join(",", vm.Navigation.Select(p => p.Id)));
+        Equal(true, vm.Navigation[4].IsPinned);
+        Equal(false, vm.Navigation[7].IsPinned);
         Equal(Visibility.Collapsed, vm.Navigation[0].PinVisibility);
-        Equal(Visibility.Visible, vm.Navigation[3].PinVisibility);
-        Equal(Visibility.Collapsed, vm.Navigation[5].PinVisibility);
+        Equal(Visibility.Visible, vm.Navigation[4].PinVisibility);
+        Equal(Visibility.Collapsed, vm.Navigation[7].PinVisibility);
+    }
+
+    private static void GroupNavigation()
+    {
+        using var fixture = new Fixture();
+        var vm = fixture.Model;
+        var first = new ProjectGroup("work", "Work", 0, DateTimeOffset.UtcNow);
+        var second = new ProjectGroup("reference", "Reference", 1, DateTimeOffset.UtcNow);
+        var pinned = new Project("pinned", "Pinned", "", true, 0, "blue", first.Id);
+        var project = new Project("project", "Design", "", false, 0, "teal", first.Id);
+        var ungrouped = new Project("loose", "Loose", "", Color: "purple");
+        var item = Missing("source.txt") with { Projects = [project, pinned] };
+        var snapshot = new LibrarySnapshot([item], [pinned, project, ungrouped], [first, second]);
+        vm.Load(snapshot);
+        Equal("@all,@recent,@missing,@pinned,pinned,@group:work,project,@group:reference,@unassigned,loose",
+            string.Join(",", vm.Navigation.Select(entry => entry.Id)));
+        Equal(1, vm.Navigation.Count(entry => entry.Id == pinned.Id));
+        var entry = vm.Navigation.Single(entry => entry.Id == project.Id);
+        Equal("teal", entry.Color);
+        Equal("work", entry.GroupId);
+        Equal(1, entry.Count);
+        Equal(18d, entry.RowMargin.Left);
+        Equal(Visibility.Collapsed, vm.Navigation.First(entry => entry.IsGroup).CountVisibility);
+        vm.NavigationId = project.Id;
+        vm.Filter();
+        vm.Select(vm.Rows.Single());
+        vm.Note = "unsaved draft";
+        var row = vm.Selected!;
+        foreach (var header in vm.Navigation.Where(entry => entry.IsHeader))
+        {
+            Equal(false, vm.TrySetNavigation(header));
+            Equal(project.Id, vm.CurrentProjectId);
+            Equal(true, vm.IsGroupExpanded(first.Id));
+            Same(row, vm.Selected!);
+            Equal("unsaved draft", vm.Note);
+        }
+        // Native keyboard traversal may pass a header and then navigate to the next project.
+        var groupHeaderIndex = vm.Navigation.ToList().FindIndex(entry => entry.IsGroup && entry.GroupId == first.Id);
+        vm.NavigationId = "@missing";
+        Equal(false, vm.TrySetNavigation(vm.Navigation[groupHeaderIndex]));
+        Equal("@missing", vm.NavigationId);
+        Equal(true, vm.TrySetNavigation(vm.Navigation[groupHeaderIndex + 1]));
+        Equal(project.Id, vm.CurrentProjectId);
+        vm.SetGroupExpanded(first.Id, false);
+        Equal(false, vm.Navigation.Any(entry => entry.Id == project.Id));
+        Equal(project.Id, vm.CurrentProjectId);
+        Equal("Design", vm.ViewTitle);
+        Same(row, vm.Selected!);
+        Equal("unsaved draft", vm.Note);
+        Equal(true, vm.IsDirty);
+        var reopened = new MainViewModel(new("en"), vm.DatabasePath);
+        reopened.Load(snapshot with { ProjectGroups = [first with { Name = "Renamed group" }, second] });
+        Equal(false, reopened.IsGroupExpanded(first.Id));
+        Equal("Renamed group", reopened.Navigation.Single(entry => entry.GroupId == first.Id && entry.IsGroup).Name);
+        vm.SetGroupExpanded(first.Id, true);
+        Equal(true, vm.Navigation.Any(entry => entry.Id == project.Id));
+        Equal(true, vm.IsDirty);
+        // An external rename/move/color update keeps the current project's resource view and ID.
+        var updated = project with { Name = "Renamed project", GroupId = second.Id, Color = "rose" };
+        vm.Load(snapshot with { Projects = [pinned, updated, ungrouped] });
+        Equal(project.Id, vm.CurrentProjectId);
+        Equal("Renamed project", vm.ViewTitle);
+        Equal(item.Id, vm.Rows.Single().Id);
+        Equal("rose", vm.Navigation.Single(entry => entry.Id == project.Id).Color);
+        Equal(true, vm.IsDirty);
     }
 
     private static void AliasDefault()
@@ -627,12 +693,13 @@ internal static class Program
         System.IO.File.WriteAllText(path, "{broken json");
         var vm = new MainViewModel(new("zh-CN"), fixture.Model.DatabasePath);
         Equal(ResourceViewMode.Details, vm.ViewMode);
-        System.IO.File.WriteAllText(path, "{\"ViewMode\":999,\"SortKey\":999,\"NavigationWidth\":-50,\"DetailsWidth\":5000}");
+        System.IO.File.WriteAllText(path, "{\"ViewMode\":999,\"SortKey\":999,\"NavigationWidth\":-50,\"DetailsWidth\":5000,\"CollapsedGroupIds\":null}");
         vm = new MainViewModel(new("zh-CN"), fixture.Model.DatabasePath);
         Equal(ResourceViewMode.Details, vm.ViewMode);
         Equal(ResourceSortKey.Name, vm.SortKey);
         Equal(160d, vm.NavigationWidth);
         Equal(620d, vm.DetailsWidth);
+        Equal(true, vm.IsGroupExpanded("new-group"));
         vm.NavigationWidth = double.NaN;
         vm.DetailsWidth = double.PositiveInfinity;
         Equal(226d, vm.NavigationWidth);

@@ -23,7 +23,7 @@ internal sealed class LibraryRepository
         // BEGIN IMMEDIATE serializes schema detection and migration across independent processes.
         using var transaction = connection.BeginTransaction();
         var version = Convert.ToInt32(Scalar(connection, transaction, "PRAGMA user_version;"), CultureInfo.InvariantCulture);
-        if (version > 4) throw new NotSupportedException("数据库来自较新版本，请使用较新版本的应用打开。");
+        if (version > 5) throw new NotSupportedException("数据库来自较新版本，请使用较新版本的应用打开。");
         Execute(connection, transaction, """
             CREATE TABLE IF NOT EXISTS Item (
                 id TEXT PRIMARY KEY,
@@ -72,6 +72,62 @@ internal sealed class LibraryRepository
                 PRAGMA user_version = 4;
                 """);
         }
+        if (version < 5)
+        {
+            Execute(connection, transaction, """
+                CREATE TABLE ProjectGroup (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    name_key TEXT NOT NULL UNIQUE,
+                    sort_order INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL
+                );
+                ALTER TABLE Project ADD COLUMN color TEXT NOT NULL DEFAULT 'default'
+                    CHECK (color IN ('default','blue','teal','purple','amber','cyan','rose','slate'));
+                ALTER TABLE Project ADD COLUMN group_id TEXT REFERENCES ProjectGroup(id) ON DELETE SET NULL;
+                CREATE INDEX ix_Project_group ON Project(group_id);
+                CREATE TRIGGER Project_immutable_id BEFORE UPDATE OF id ON Project
+                    WHEN NEW.id IS NOT OLD.id BEGIN SELECT RAISE(ABORT,'Project ID is immutable'); END;
+                CREATE TRIGGER ProjectGroup_immutable_id BEFORE UPDATE OF id ON ProjectGroup
+                    WHEN NEW.id IS NOT OLD.id BEGIN SELECT RAISE(ABORT,'Project Group ID is immutable'); END;
+                PRAGMA user_version = 5;
+                """);
+        }
+        // Additive coordination metadata keeps the established schema/IDs compatible.
+        // Tombstones survive membership deletion, making remove/re-add (ABA) observable
+        // to session undo even when the relationship's final state looks unchanged.
+        Execute(connection, transaction, """
+            CREATE TABLE IF NOT EXISTS ResourceReferenceRevision (
+                project_id TEXT NOT NULL,
+                item_id TEXT NOT NULL,
+                revision INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY(project_id,item_id)
+            );
+            INSERT OR IGNORE INTO ResourceReferenceRevision(project_id,item_id,revision)
+                SELECT project_id,item_id,0 FROM ProjectItem;
+            CREATE TRIGGER IF NOT EXISTS ProjectItem_reference_insert AFTER INSERT ON ProjectItem
+            BEGIN
+                INSERT INTO ResourceReferenceRevision(project_id,item_id,revision)
+                    VALUES(NEW.project_id,NEW.item_id,1)
+                    ON CONFLICT(project_id,item_id) DO UPDATE SET revision=revision+1;
+            END;
+            CREATE TRIGGER IF NOT EXISTS ProjectItem_reference_delete AFTER DELETE ON ProjectItem
+            BEGIN
+                INSERT INTO ResourceReferenceRevision(project_id,item_id,revision)
+                    VALUES(OLD.project_id,OLD.item_id,1)
+                    ON CONFLICT(project_id,item_id) DO UPDATE SET revision=revision+1;
+            END;
+            CREATE TRIGGER IF NOT EXISTS ProjectItem_reference_update AFTER UPDATE ON ProjectItem
+                WHEN OLD.project_id IS NOT NEW.project_id OR OLD.item_id IS NOT NEW.item_id
+            BEGIN
+                INSERT INTO ResourceReferenceRevision(project_id,item_id,revision)
+                    VALUES(OLD.project_id,OLD.item_id,1)
+                    ON CONFLICT(project_id,item_id) DO UPDATE SET revision=revision+1;
+                INSERT INTO ResourceReferenceRevision(project_id,item_id,revision)
+                    VALUES(NEW.project_id,NEW.item_id,1)
+                    ON CONFLICT(project_id,item_id) DO UPDATE SET revision=revision+1;
+            END;
+            """);
         transaction.Commit();
         // A single writer and concurrent readers can share this local database without a server.
         Execute(connection, null, "PRAGMA journal_mode=WAL;");
@@ -120,9 +176,20 @@ internal sealed class LibraryRepository
     public static LibrarySnapshot ReadSnapshot(SqliteConnection connection, SqliteTransaction transaction)
     {
         var projects = new List<Project>();
-        using (var command = Command(connection, transaction, "SELECT id,name,description,is_pinned,sort_order FROM Project ORDER BY is_pinned DESC,sort_order,name COLLATE NOCASE,id;"))
+        using (var command = Command(connection, transaction, """
+                   SELECT p.id,p.name,p.description,p.is_pinned,p.sort_order,p.color,p.group_id
+                   FROM Project AS p LEFT JOIN ProjectGroup AS g ON g.id=p.group_id
+                   ORDER BY p.is_pinned DESC,
+                       CASE WHEN p.is_pinned=0 AND p.group_id IS NULL THEN 1 ELSE 0 END,
+                       CASE WHEN p.is_pinned=0 THEN g.sort_order ELSE 0 END,
+                       p.sort_order,p.name COLLATE NOCASE,p.id;
+                   """))
         using (var reader = command.ExecuteReader())
-            while (reader.Read()) projects.Add(new Project(reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.GetInt64(3) != 0, reader.GetInt64(4)));
+            while (reader.Read()) projects.Add(ReadProjectRow(reader));
+        var groups = new List<ProjectGroup>();
+        using (var command = Command(connection, transaction, "SELECT id,name,sort_order,created_at FROM ProjectGroup ORDER BY sort_order,name COLLATE NOCASE,id;"))
+        using (var reader = command.ExecuteReader())
+            while (reader.Read()) groups.Add(ReadProjectGroupRow(reader));
         var projectsById = projects.ToDictionary(project => project.Id);
         var memberships = new Dictionary<string, List<Project>>();
         using (var command = Command(connection, transaction, "SELECT item_id,project_id FROM ProjectItem;"))
@@ -152,19 +219,19 @@ internal sealed class LibraryRepository
                     reader.IsDBNull(12) ? null : (byte[])reader.GetValue(12)));
             }
         }
-        return new LibrarySnapshot(items, projects);
+        return new LibrarySnapshot(items, projects, groups);
     }
 
     public static ResourceItem? ReadItem(SqliteConnection connection, SqliteTransaction? transaction, string id)
     {
         var projects = new List<Project>();
         using (var command = Command(connection, transaction, """
-                   SELECT p.id,p.name,p.description,p.is_pinned,p.sort_order
+                   SELECT p.id,p.name,p.description,p.is_pinned,p.sort_order,p.color,p.group_id
                    FROM Project AS p INNER JOIN ProjectItem AS membership ON membership.project_id=p.id
                    WHERE membership.item_id=$id ORDER BY p.name COLLATE NOCASE,p.id;
                    """, ("$id", id)))
         using (var reader = command.ExecuteReader())
-            while (reader.Read()) projects.Add(new Project(reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.GetInt64(3) != 0, reader.GetInt64(4)));
+            while (reader.Read()) projects.Add(ReadProjectRow(reader));
         using var itemCommand = Command(connection, transaction, """
             SELECT id,type,target,alias,description,note,created_at,updated_at,last_opened_at,open_count,volume_id,file_id,favicon
             FROM Item WHERE id=$id;
@@ -181,11 +248,25 @@ internal sealed class LibraryRepository
     public static Project? ReadProject(SqliteConnection connection, SqliteTransaction? transaction, string id)
     {
         using var command = Command(connection, transaction,
-            "SELECT id,name,description,is_pinned,sort_order FROM Project WHERE id=$id;", ("$id", id));
+            "SELECT id,name,description,is_pinned,sort_order,color,group_id FROM Project WHERE id=$id;", ("$id", id));
         using var reader = command.ExecuteReader();
-        return reader.Read() ? new Project(reader.GetString(0), reader.GetString(1), reader.GetString(2),
-            reader.GetInt64(3) != 0, reader.GetInt64(4)) : null;
+        return reader.Read() ? ReadProjectRow(reader) : null;
     }
+
+    public static ProjectGroup? ReadProjectGroup(SqliteConnection connection, SqliteTransaction? transaction, string id)
+    {
+        using var command = Command(connection, transaction,
+            "SELECT id,name,sort_order,created_at FROM ProjectGroup WHERE id=$id;", ("$id", id));
+        using var reader = command.ExecuteReader();
+        return reader.Read() ? ReadProjectGroupRow(reader) : null;
+    }
+
+    private static Project ReadProjectRow(SqliteDataReader reader) => new(reader.GetString(0), reader.GetString(1),
+        reader.GetString(2), reader.GetInt64(3) != 0, reader.GetInt64(4), reader.GetString(5),
+        reader.IsDBNull(6) ? null : reader.GetString(6));
+
+    private static ProjectGroup ReadProjectGroupRow(SqliteDataReader reader) => new(reader.GetString(0),
+        reader.GetString(1), reader.GetInt64(2), ReadTime(reader.GetString(3)));
 
     public static string Time(DateTimeOffset value) => value.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture);
     private static DateTimeOffset ReadTime(string value) => DateTimeOffset.Parse(value, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind);

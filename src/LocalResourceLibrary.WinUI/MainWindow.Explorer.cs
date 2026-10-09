@@ -240,18 +240,6 @@ public sealed partial class MainWindow
         finally { _rendering = false; }
     }
 
-    private void Resource_PointerPressed(object sender, PointerRoutedEventArgs e)
-    {
-        if (!e.GetCurrentPoint((UIElement)sender).Properties.IsLeftButtonPressed) return;
-        var parent = e.OriginalSource as DependencyObject;
-        while (parent != null && !ReferenceEquals(parent, sender))
-        {
-            if (parent is ListViewItem or GridViewItem or ScrollBar or Thumb) return;
-            parent = VisualTreeHelper.GetParent(parent);
-        }
-        ClearSelectionAsync();
-    }
-
     private bool IsResourceFocus()
     {
         var element = FocusManager.GetFocusedElement(Root.XamlRoot) as DependencyObject;

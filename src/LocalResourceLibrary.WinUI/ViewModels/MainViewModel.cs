@@ -19,14 +19,25 @@ public abstract class Observable : INotifyPropertyChanged
     protected void Notify([CallerMemberName] string? name = null) => PropertyChanged?.Invoke(this, new(name));
 }
 
-public sealed record NavigationEntry(string Id, string Name, int Count, bool IsProject, bool IsPinned = false)
+public sealed record NavigationEntry(string Id, string Name, int Count, bool IsProject, bool IsPinned = false,
+    string Color = "default", string? GroupId = null, bool IsGroup = false, bool IsExpanded = true)
 {
+    public bool IsHeader => IsGroup || Id is "@pinned" or "@unassigned";
+    public Visibility HeaderVisibility => IsHeader ? Visibility.Visible : Visibility.Collapsed;
+    public Visibility NameVisibility => IsHeader ? Visibility.Collapsed : Visibility.Visible;
+    public Visibility CountVisibility => IsHeader ? Visibility.Collapsed : Visibility.Visible;
+    public Thickness RowMargin => new(IsProject ? 18 : 0, IsHeader ? 7 : 0, 0, 0);
+    public double IconSize => IsHeader ? 12 : 17;
+    public Visibility ProjectIconVisibility => IsProject ? Visibility.Visible : Visibility.Collapsed;
+    public Visibility SystemIconVisibility => IsProject ? Visibility.Collapsed : Visibility.Visible;
     public Visibility PinVisibility => IsProject && IsPinned ? Visibility.Visible : Visibility.Collapsed;
-    public string IconGlyph => Id switch
+    public string IconGlyph => IsGroup ? (IsExpanded ? "\uE70D" : "\uE76C") : Id switch
     {
         "@all" => "\uE80F",
         "@recent" => "\uE823",
         "@missing" => "\uE7BA",
+        "@pinned" => "\uE840",
+        "@unassigned" => "\uE70D",
         _ => "\uE8B7"
     };
 }
@@ -55,6 +66,9 @@ public sealed class ResourceRow : Observable
         FileSize = metadata.Size;
     }
     public ResourceItem Item => _item;
+    private bool _isCut;
+    public bool IsCut { get => _isCut; set { if (_isCut == value) return; _isCut = value; Notify(); Notify(nameof(ResourceOpacity)); } }
+    public double ResourceOpacity => IsCut ? 0.45 : 1;
     public string Id => _item.Id;
     public string Name => _item.DisplayName;
     public string RealName => _item.RealName;
@@ -254,6 +268,13 @@ public sealed class MainViewModel : Observable
     public ObservableCollection<ResourceRow> Rows { get; } = [];
     public ObservableCollection<MembershipChoice> Memberships { get; } = [];
     public string NavigationId { get; set; } = "@all";
+    /// <summary>Header focus is separate from the current resource view; only resource rows navigate.</summary>
+    public bool TrySetNavigation(NavigationEntry entry)
+    {
+        if (entry.IsHeader || entry.Id == NavigationId) return false;
+        NavigationId = entry.Id;
+        return true;
+    }
     public string Query { get; set; } = "";
     public ResourceRow? Selected { get; private set; }
     public IReadOnlyList<ResourceRow> SelectedRows { get; private set; } = [];
@@ -276,7 +297,8 @@ public sealed class MainViewModel : Observable
     public Visibility NoProjectsVisibility => Memberships.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
     public string EmptyTitle => Text[Snapshot.Items.Count == 0 ? "EmptyTitle" : "NoResults"];
     public string EmptyHelp => Text[Snapshot.Items.Count == 0 ? "EmptyHelp" : "NoResultsHelp"];
-    public string ViewTitle => Navigation.FirstOrDefault(p => p.Id == NavigationId)?.Name ?? Text["All"];
+    public string ViewTitle => Snapshot.Projects.FirstOrDefault(p => p.Id == NavigationId)?.Name
+        ?? Navigation.FirstOrDefault(p => p.Id == NavigationId)?.Name ?? Text["All"];
     public string CountText => Text.Format("Count", Rows.Count);
     public string CreatedText => Selected?.Item.CreatedAt.ToLocalTime().ToString("yyyy-MM-dd HH:mm") ?? "";
     public string UpdatedText => Selected?.Item.UpdatedAt.ToLocalTime().ToString("yyyy-MM-dd HH:mm") ?? "";
@@ -306,7 +328,7 @@ public sealed class MainViewModel : Observable
             Memberships.Where(choice => choice.IsSelected).Select(choice => choice.Id), normalizedUrl) : null;
     public string SaveState => Text[IsDirty ? "Unsaved" : "Saved"];
     private void NotifyDirty() { Notify(nameof(IsDirty)); Notify(nameof(SaveState)); }
-    public string? CurrentProjectId => Navigation.FirstOrDefault(p => p.Id == NavigationId && p.IsProject)?.Id;
+    public string? CurrentProjectId => Snapshot.Projects.FirstOrDefault(p => p.Id == NavigationId)?.Id;
     /// <summary>Call before an explicit refresh to read current dates and sizes again.</summary>
     public void InvalidateFileMetadata() => _metadata.Clear();
 
@@ -316,14 +338,50 @@ public sealed class MainViewModel : Observable
         var currentIds = snapshot.Items.Select(item => item.Id).ToHashSet();
         foreach (var id in _metadata.Keys.Where(id => !currentIds.Contains(id)).ToArray()) _metadata.Remove(id);
         foreach (var id in _rowCache.Keys.Where(id => !currentIds.Contains(id)).ToArray()) _rowCache.Remove(id);
+        RebuildNavigation();
+        if (NavigationId is not ("@all" or "@recent" or "@missing") && CurrentProjectId == null) NavigationId = "@all";
+        Filter();
+    }
+
+    public bool IsGroupExpanded(string groupId) => !_preferences.CollapsedGroupIds.Contains(groupId, StringComparer.Ordinal);
+
+    public void SetGroupExpanded(string groupId, bool expanded)
+    {
+        var collapsed = _preferences.CollapsedGroupIds.ToHashSet(StringComparer.Ordinal);
+        if (expanded ? !collapsed.Remove(groupId) : !collapsed.Add(groupId)) return;
+        _preferences = _preferences with { CollapsedGroupIds = collapsed.Order(StringComparer.Ordinal).ToArray() };
+        SavePreferences();
+        RebuildNavigation();
+    }
+
+    private void RebuildNavigation()
+    {
+        var snapshot = Snapshot;
         Navigation.Clear();
         Navigation.Add(new("@all", Text["All"], snapshot.Items.Count, false));
         Navigation.Add(new("@recent", Text["Recent"], snapshot.Items.Count(i => i.LastOpenedAt != null), false));
         Navigation.Add(new("@missing", Text["Missing"], snapshot.Items.Count(i => i.IsMissing), false));
-        foreach (var project in snapshot.Projects)
-            Navigation.Add(new(project.Id, project.Name, snapshot.Items.Count(i => i.Projects.Any(p => p.Id == project.Id)), true, project.IsPinned));
-        if (!Navigation.Any(p => p.Id == NavigationId)) NavigationId = "@all";
-        Filter();
+        void AddProjects(IEnumerable<Project> projects)
+        {
+            foreach (var project in projects.OrderBy(project => project.SortOrder).ThenBy(project => project.Name, StringComparer.CurrentCultureIgnoreCase))
+                Navigation.Add(new(project.Id, project.Name, snapshot.Items.Count(i => i.Projects.Any(p => p.Id == project.Id)),
+                    true, project.IsPinned, project.Color, project.GroupId));
+        }
+        if (snapshot.Projects.Any(project => project.IsPinned))
+        {
+            Navigation.Add(new("@pinned", Text["PinnedProjects"], 0, false));
+            AddProjects(snapshot.Projects.Where(project => project.IsPinned));
+        }
+        var groups = snapshot.ProjectGroups ?? [];
+        foreach (var group in groups.OrderBy(group => group.SortOrder).ThenBy(group => group.Name, StringComparer.CurrentCultureIgnoreCase))
+        {
+            var expanded = IsGroupExpanded(group.Id);
+            Navigation.Add(new("@group:" + group.Id, group.Name, 0, false, GroupId: group.Id, IsGroup: true, IsExpanded: expanded));
+            if (expanded) AddProjects(snapshot.Projects.Where(project => !project.IsPinned && project.GroupId == group.Id));
+        }
+        Navigation.Add(new("@unassigned", Text["UngroupedProjects"], 0, false));
+        AddProjects(snapshot.Projects.Where(project => !project.IsPinned &&
+            (project.GroupId == null || !groups.Any(group => group.Id == project.GroupId))));
     }
     public void Filter()
     {

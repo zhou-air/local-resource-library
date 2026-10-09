@@ -4,7 +4,7 @@ using static LocalResourceLibrary.Core.LibraryRepository;
 namespace LocalResourceLibrary.Core;
 
 /// <summary>Library metadata and resource operations. Adding/removing membership never copies or deletes a resource.</summary>
-public sealed class LibraryService
+public sealed partial class LibraryService
 {
     private readonly LibraryRepository repository;
     private readonly IResourcePlatform platform;
@@ -73,31 +73,35 @@ public sealed class LibraryService
     public AddResourcesResult AddPaths(IEnumerable<string> paths, string? projectId = null)
     {
         ArgumentNullException.ThrowIfNull(paths);
-        lock (gate)
+        var added = 0;
+        var existing = 0;
+        var errors = new List<string>();
+        Write((connection, transaction) =>
         {
-            if (projectId != null)
-            {
-                using var connection = repository.Connect();
-                RequireProject(connection, null, projectId);
-            }
-            var added = 0;
-            var existing = 0;
-            var errors = new List<string>();
+            if (projectId != null) RequireProject(connection, transaction, projectId);
             foreach (var rawPath in paths)
             {
+                // Preserve the legacy per-path error contract, but commit successful imports
+                // together and record the complete call as one undo unit.
+                transaction.Save("register_path");
                 try
                 {
-                    var result = RegisterResource(null, rawPath, null, null, null, projectId == null ? [] : [projectId]);
+                    var target = ResourcePaths.Normalize(rawPath);
+                    var result = RegisterResourceInTransaction(connection, transaction, null, target, ResourcePaths.Key(target),
+                        null, null, null, projectId == null ? [] : [projectId], null, out _);
+                    transaction.Release("register_path");
                     if (result.Added) added++; else existing++;
                 }
                 catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or
                                                   ArgumentException or NotSupportedException or SqliteException or InvalidOperationException)
                 {
+                    transaction.Rollback("register_path");
+                    transaction.Release("register_path");
                     errors.Add($"{rawPath}: {exception.Message}");
                 }
             }
-            return new AddResourcesResult(added, existing, errors);
-        }
+        });
+        return new AddResourcesResult(added, existing, errors);
     }
 
     /// <summary>Collect an exact URL once, or add memberships without overwriting the existing context.</summary>
@@ -116,45 +120,10 @@ public sealed class LibraryService
         var key = requestedType == ResourceUrls.Type ? ResourceUrls.Key(target) : ResourcePaths.Key(target);
         var ids = projectIds.Distinct(StringComparer.Ordinal).ToArray();
         var icon = ResourceUrls.CopyFavicon(favicon);
-        lock (gate)
-        {
-            using var connection = repository.Connect();
-            using var transaction = connection.BeginTransaction();
-            foreach (var projectId in ids) RequireProject(connection, transaction, projectId);
-            var itemId = Scalar(connection, transaction, "SELECT id FROM Item WHERE path_key=$key;", ("$key", key)) as string;
-            var added = itemId == null;
-            if (added)
-            {
-                var type = requestedType ?? (platform.DirectoryExists(target) ? "folder" : platform.FileExists(target) ? "file" : null);
-                if (type == null || !Exists(target, type))
-                    throw new FileNotFoundException("路径不存在、暂时无法访问，或资源类型与路径不同。", target);
-                itemId = Guid.NewGuid().ToString("N");
-                var now = Time(DateTimeOffset.UtcNow);
-                var identity = type == "file" ? CaptureIdentity(target) : null;
-                Execute(connection, transaction, """
-                    INSERT INTO Item(id,type,target,path_key,alias,description,note,created_at,updated_at,volume_id,file_id,favicon)
-                    VALUES($id,$type,$target,$key,$alias,$description,$note,$now,$now,$volume,$file,$icon);
-                    """, ("$id", itemId), ("$type", type), ("$target", target), ("$key", key),
-                    ("$alias", alias ?? ""), ("$description", description ?? ""), ("$note", note ?? ""),
-                    ("$now", now), ("$volume", identity?.VolumeId), ("$file", identity?.FileId), ("$icon", icon));
-            }
-            else
-            {
-                var existing = RequireItem(connection, transaction, itemId!);
-                if (requestedType != null && existing.Type != requestedType)
-                    throw new InvalidOperationException("相同路径已收藏为其他资源类型，请使用现有记录。");
-                if (Exists(existing.Target, existing.Type)) BackfillIdentity(connection, transaction, existing);
-            }
-            var changed = 0;
-            foreach (var projectId in ids)
-                changed += Execute(connection, transaction, "INSERT OR IGNORE INTO ProjectItem(project_id,item_id) VALUES($project,$item);",
-                    ("$project", projectId), ("$item", itemId));
-            if (!added && changed > 0) Touch(connection, transaction, itemId!);
-            var item = RequireItem(connection, transaction, itemId!);
-            item = item with { IsMissing = !Exists(item.Target, item.Type) };
-            transaction.Commit();
-            return new AddResourceResult(item, added);
-        }
+        AddResourceResult result = null!;
+        Write((connection, transaction) => result = RegisterResourceInTransaction(connection, transaction,
+            requestedType, target, key, alias, description, note, ids, icon, out _));
+        return result;
     }
 
     /// <summary>Update the URL and its context atomically. A changed target drops an old icon unless one is supplied.</summary>
@@ -274,13 +243,17 @@ public sealed class LibraryService
                     else originals.Add(patch.Id, item);
                 }
                 if (failures.Count > 0) return new ResourceMetadataBatchResult(false, [], failures);
+                var before = enableHistory ? ReadHistoryState(connection, transaction) : null;
+                PrepareHistory(before);
                 foreach (var patch in changes) ApplyMetadataPatch(connection, transaction, originals[patch.Id], patch);
                 var items = changes.Select(patch =>
                 {
                     var item = RequireItem(connection, transaction, patch.Id);
                     return item with { IsMissing = !Exists(item.Target, item.Type) };
                 }).ToArray();
+                var after = enableHistory ? ReadHistoryState(connection, transaction) : null;
                 transaction.Commit();
+                RecordHistory(before, after, "EditResource");
                 return new ResourceMetadataBatchResult(true, items, []);
             }
             catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or SqliteException)
@@ -383,17 +356,31 @@ public sealed class LibraryService
         current.Projects.OrderBy(project => project.Id, StringComparer.Ordinal)
             .SequenceEqual(expected.Projects.OrderBy(project => project.Id, StringComparer.Ordinal));
 
-    public Project CreateProject(string name, string description = "")
+    public Project GetProject(string id)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(id);
+        lock (gate)
+        {
+            using var connection = repository.Connect();
+            return ReadProject(connection, null, id) ?? throw new KeyNotFoundException("项目不存在。");
+        }
+    }
+
+    public Project CreateProject(string name, string description = "", string color = ProjectColors.Default, string? groupId = null)
     {
         name = ValidateProjectName(name);
-        var project = new Project(Guid.NewGuid().ToString("N"), name, description ?? "");
+        color = ProjectColors.Normalize(color);
+        var project = new Project(Guid.NewGuid().ToString("N"), name, description ?? "", Color: color, GroupId: groupId);
         Write((connection, transaction) =>
         {
             EnsureProjectNameAvailable(connection, transaction, name);
-            project = project with { SortOrder = Convert.ToInt64(Scalar(connection, transaction,
-                "SELECT COALESCE(MAX(sort_order),-1)+1 FROM Project WHERE is_pinned=0;")) };
-            Execute(connection, transaction, "INSERT INTO Project(id,name,name_key,description,sort_order) VALUES($id,$name,$key,$description,$order);",
-                ("$id", project.Id), ("$name", name), ("$key", name.ToUpperInvariant()), ("$description", project.Description), ("$order", project.SortOrder));
+            if (groupId != null) RequireProjectGroup(connection, transaction, groupId);
+            project = project with { SortOrder = NextProjectOrder(connection, transaction, false, groupId) };
+            Execute(connection, transaction, """
+                INSERT INTO Project(id,name,name_key,description,sort_order,color,group_id)
+                VALUES($id,$name,$key,$description,$order,$color,$group);
+                """, ("$id", project.Id), ("$name", name), ("$key", name.ToUpperInvariant()),
+                ("$description", project.Description), ("$order", project.SortOrder), ("$color", color), ("$group", groupId));
         });
         return project;
     }
@@ -410,38 +397,51 @@ public sealed class LibraryService
         });
     }
 
-    public Project PatchProject(string id, string? name = null, string? description = null, Project? expected = null)
+    public Project PatchProject(string id, string? name = null, string? description = null, Project? expected = null,
+        string? color = null, string? groupId = null, bool clearGroup = false)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(id);
         if (name != null) name = ValidateProjectName(name);
+        if (color != null) color = ProjectColors.Normalize(color);
+        if (clearGroup && groupId != null) throw new ArgumentException("清除分组时不能同时指定分组 ID。", nameof(groupId));
         Project result = null!;
         Write((connection, transaction) =>
         {
             var current = ReadProject(connection, transaction, id) ?? throw new KeyNotFoundException("项目不存在。");
             if (expected != null && (expected.Id != id ||
                 (name != null && current.Name != expected.Name) ||
-                (description != null && current.Description != expected.Description)))
+                (description != null && current.Description != expected.Description) ||
+                (color != null && current.Color != expected.Color) ||
+                ((groupId != null || clearGroup) && current.GroupId != expected.GroupId)))
                 throw new InvalidOperationException("项目已被其他进程修改，请刷新后重试。");
             var newName = name ?? current.Name;
+            var newGroupId = clearGroup ? null : groupId ?? current.GroupId;
+            if (groupId != null) RequireProjectGroup(connection, transaction, groupId);
+            var newOrder = newGroupId != current.GroupId && !current.IsPinned
+                ? NextProjectOrder(connection, transaction, false, newGroupId) : current.SortOrder;
             if (name != null) EnsureProjectNameAvailable(connection, transaction, newName, id);
-            Execute(connection, transaction, "UPDATE Project SET name=$name,name_key=$key,description=COALESCE($description,description) WHERE id=$id;",
-                ("$id", id), ("$name", newName), ("$key", newName.ToUpperInvariant()), ("$description", description));
-            result = current with { Name = newName, Description = description ?? current.Description };
+            Execute(connection, transaction, """
+                UPDATE Project SET name=$name,name_key=$key,description=COALESCE($description,description),
+                    color=COALESCE($color,color),group_id=$group,sort_order=$order WHERE id=$id;
+                """, ("$id", id), ("$name", newName), ("$key", newName.ToUpperInvariant()),
+                ("$description", description), ("$color", color), ("$group", newGroupId), ("$order", newOrder));
+            result = current with { Name = newName, Description = description ?? current.Description,
+                Color = color ?? current.Color, GroupId = newGroupId, SortOrder = newOrder };
         });
         return result;
     }
 
     public void SetProjectPinned(string id, bool pinned) => Write((connection, transaction) =>
     {
-        RequireProject(connection, transaction, id);
+        var current = ReadProject(connection, transaction, id) ?? throw new KeyNotFoundException("项目不存在。");
+        if (current.IsPinned == pinned) return;
         Execute(connection, transaction, """
-            UPDATE Project SET is_pinned=$pinned,
-                sort_order=(SELECT COALESCE(MAX(sort_order),-1)+1 FROM Project WHERE is_pinned=$pinned)
-            WHERE id=$id AND is_pinned<>$pinned;
-            """, ("$id", id), ("$pinned", pinned ? 1 : 0));
+            UPDATE Project SET is_pinned=$pinned,sort_order=$order WHERE id=$id;
+            """, ("$id", id), ("$pinned", pinned ? 1 : 0),
+            ("$order", NextProjectOrder(connection, transaction, pinned, current.GroupId)));
     });
 
-    /// <summary>Move relative to another project in the same pinned group, atomically.</summary>
+    /// <summary>Reorder pinned projects globally; ordinary projects adopt the target's group.</summary>
     public void MoveProject(string id, string targetId, bool after) => Write((connection, transaction) =>
     {
         var projects = ReadSnapshot(connection, transaction).Projects;
@@ -449,11 +449,26 @@ public sealed class LibraryService
         var target = projects.FirstOrDefault(project => project.Id == targetId) ?? throw new KeyNotFoundException("项目不存在。");
         if (source.IsPinned != target.IsPinned) throw new InvalidOperationException("只能在同一置顶分组内排序。");
         if (id == targetId) return;
-        var group = projects.Where(project => project.IsPinned == source.IsPinned && project.Id != id).ToList();
+        var group = projects.Where(project => project.IsPinned == source.IsPinned &&
+            (source.IsPinned || project.GroupId == target.GroupId) && project.Id != id).ToList();
+        if (!source.IsPinned && source.GroupId != target.GroupId)
+            Execute(connection, transaction, "UPDATE Project SET group_id=$group WHERE id=$id;",
+                ("$group", target.GroupId), ("$id", id));
         group.Insert(group.FindIndex(project => project.Id == targetId) + (after ? 1 : 0), source);
         for (var index = 0; index < group.Count; index++)
             Execute(connection, transaction, "UPDATE Project SET sort_order=$order WHERE id=$id;",
                 ("$id", group[index].Id), ("$order", index));
+    });
+
+    /// <summary>Change group without changing pin status; unpinned projects append to the target group.</summary>
+    public void MoveProjectToGroup(string id, string? groupId) => Write((connection, transaction) =>
+    {
+        var current = ReadProject(connection, transaction, id) ?? throw new KeyNotFoundException("项目不存在。");
+        if (groupId != null) RequireProjectGroup(connection, transaction, groupId);
+        if (current.GroupId == groupId) return;
+        Execute(connection, transaction, "UPDATE Project SET group_id=$group,sort_order=$order WHERE id=$id;",
+            ("$id", id), ("$group", groupId), ("$order", current.IsPinned ? current.SortOrder :
+                NextProjectOrder(connection, transaction, false, groupId)));
     });
 
     public void DeleteProject(string id) => Write((connection, transaction) =>
@@ -668,14 +683,19 @@ public sealed class LibraryService
         }
     }
 
-    private void Write(Action<SqliteConnection, SqliteTransaction> action)
+    private void Write(Action<SqliteConnection, SqliteTransaction> action, string? historyDescription = null,
+        [System.Runtime.CompilerServices.CallerMemberName] string operation = "")
     {
         lock (gate)
         {
             using var connection = repository.Connect();
             using var transaction = connection.BeginTransaction();
+            var before = enableHistory ? ReadHistoryState(connection, transaction, HistoryIncludesItems(operation)) : null;
+            PrepareHistory(before);
             action(connection, transaction);
+            var after = enableHistory ? ReadHistoryState(connection, transaction, HistoryIncludesItems(operation)) : null;
             transaction.Commit();
+            RecordHistory(before, after, historyDescription ?? HistoryDescription(operation));
         }
     }
 

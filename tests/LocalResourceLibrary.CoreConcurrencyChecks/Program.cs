@@ -16,7 +16,8 @@ internal static class Program
             ("Database write failure rolls back the entire metadata batch", BatchWriteRollback),
             ("Query recovers file identity without opening or changing its context", QueryIdentityRecovery),
             ("UI edit saves only edited fields and rejects same-field conflicts", UiEditConflicts),
-            ("Project patches preserve metadata, memberships and ordering", ProjectPatch)
+            ("Project patches preserve metadata, memberships and ordering", ProjectPatch),
+            ("Concurrent group creation and project color patches preserve all fields", ConcurrentProjectGroups)
         ];
         var failed = 0;
         foreach (var check in checks)
@@ -40,7 +41,7 @@ internal static class Program
     {
         using var fixture = new Fixture();
         var services = await Task.WhenAll(Enumerable.Range(0, 10).Select(_ => Task.Run(fixture.Service)));
-        Equal(4L, Convert.ToInt64(fixture.Scalar("PRAGMA user_version;")), "schema version");
+        Equal(5L, Convert.ToInt64(fixture.Scalar("PRAGMA user_version;")), "schema version");
         Equal("wal", fixture.Scalar("PRAGMA journal_mode;") as string, "concurrent-reader journal");
         foreach (var service in services) Equal(0, service.GetSnapshot(checkPaths: false).Items.Count, "empty new library");
     }
@@ -64,7 +65,7 @@ internal static class Program
             PRAGMA user_version=3;
             """);
         var services = await Task.WhenAll(Enumerable.Range(0, 8).Select(_ => Task.Run(fixture.Service)));
-        Equal(4L, Convert.ToInt64(fixture.Scalar("PRAGMA user_version;")), "migrated version");
+        Equal(5L, Convert.ToInt64(fixture.Scalar("PRAGMA user_version;")), "migrated version");
         foreach (var service in services)
         {
             var item = service.GetResource("old-item");
@@ -275,6 +276,36 @@ internal static class Program
     private static void Require(bool condition, string message)
     {
         if (!condition) throw new InvalidOperationException(message);
+    }
+
+    private static async Task ConcurrentProjectGroups()
+    {
+        using var fixture = new Fixture();
+        var services = Enumerable.Range(0, 6).Select(_ => fixture.Service()).ToArray();
+        var groups = await Task.WhenAll(services.Select((service, index) => Task.Run(() => service.CreateProjectGroup($"Group {index}"))));
+        Equal(6, services[0].GetSnapshot(false).ProjectGroups!.Count, "all concurrent groups created");
+        Equal(6, groups.Select(group => group.Id).Distinct().Count(), "group IDs stay unique");
+        Equal(6, groups.Select(group => group.SortOrder).Distinct().Count(), "serialized creation reserves distinct group positions");
+        var project = services[0].CreateProject("Initial project", "Initial description", groupId: groups[0].Id);
+        var item = services[0].AddResource("url", "https://example.test/concurrent-groups", projectIds: [project.Id]).Item;
+        await Task.WhenAll(
+            Task.Run(() => services[1].PatchProject(project.Id, name: "Edited name")),
+            Task.Run(() => services[2].PatchProject(project.Id, description: "Edited description")),
+            Task.Run(() => services[3].PatchProject(project.Id, color: "purple")),
+            Task.Run(() => services[4].PatchProject(project.Id, groupId: groups[1].Id)));
+        var current = services[0].GetProject(project.Id);
+        Equal("Edited name", current.Name, "concurrent name remains");
+        Equal("Edited description", current.Description, "concurrent description remains");
+        Equal("purple", current.Color, "concurrent color remains");
+        Equal(groups[1].Id, current.GroupId, "concurrent grouping remains");
+        Equal(project.Id, services[0].GetResource(item.Id, false).Projects.Single().Id, "resource membership remains permanent");
+        var beforeColor = current;
+        services[1].PatchProject(project.Id, color: "teal");
+        Throws(() => services[2].PatchProject(project.Id, expected: beforeColor, color: "rose"), "stale color edit rejected");
+        var beforeGroup = services[0].GetProject(project.Id);
+        services[1].MoveProjectToGroup(project.Id, groups[2].Id);
+        Throws(() => services[2].PatchProject(project.Id, expected: beforeGroup, clearGroup: true), "stale group edit rejected");
+        Equal(groups[2].Id, services[0].GetProject(project.Id).GroupId, "failed stale group patch keeps concurrent group");
     }
 
     private static void Equal<T>(T expected, T actual, string message) => Require(EqualityComparer<T>.Default.Equals(expected, actual),

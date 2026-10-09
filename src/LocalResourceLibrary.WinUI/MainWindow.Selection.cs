@@ -14,13 +14,15 @@ public sealed partial class MainWindow
 
     private void SyncResourceSelection()
     {
+        var selected = _vm.SelectedRows.ToHashSet();
         foreach (var control in new ListViewBase[] { ResourceList, ResourceGrid })
         {
             // Keep the native selection anchor for subsequent Shift-click and keyboard ranges.
             foreach (var row in control.SelectedItems.OfType<ResourceRow>().ToArray())
-                if (!_vm.SelectedRows.Contains(row)) control.SelectedItems.Remove(row);
+                if (!selected.Contains(row)) control.SelectedItems.Remove(row);
+            var present = control.SelectedItems.OfType<ResourceRow>().ToHashSet();
             foreach (var row in _vm.SelectedRows)
-                if (!control.SelectedItems.Contains(row)) control.SelectedItems.Add(row);
+                if (!present.Contains(row)) control.SelectedItems.Add(row);
         }
     }
 
@@ -137,10 +139,11 @@ public sealed partial class MainWindow
                 menu.Items.Add(MenuItem(_text["OpenLocation"], "ResourceLocationMenu", Location_Click, Symbol.Folder));
                 menu.Items.Add(MenuItem(_text["EditDetails"], "ResourceEditDetailsMenu", EditDetails_Click, Symbol.Edit));
             }
-            menu.Items.Add(MenuItem(_text["EditMemberships"], "ResourceMembershipsMenu", EditMemberships_Click));
         }
         if (row != null && ids.Length > 0)
         {
+            menu.Items.Add(MenuItem(Label("复制", "Copy"), "ResourceCopyMenu", CopyResources_Click, Symbol.Copy));
+            menu.Items.Add(MenuItem(Label("剪切", "Cut"), "ResourceCutMenu", CutResources_Click, Symbol.Cut));
             var copyKey = _vm.SelectedRows.All(selected => selected.IsUrl) ? "CopyUrl" :
                 _vm.SelectedRows.Any(selected => selected.IsUrl) ? "CopyTargets" : "CopyPath";
             menu.Items.Add(MenuItem(_text[copyKey], "ResourceCopyPathsMenu", CopyPath_Click, Symbol.Copy));
@@ -152,8 +155,23 @@ public sealed partial class MainWindow
                 async (_, _) => await DeleteResourcesAsync(ids), Symbol.Delete));
             menu.Items.Add(new MenuFlyoutSeparator());
         }
+        var paste = MenuItem(Label("粘贴", "Paste"), "ResourcePasteMenu", PasteResources_Click, Symbol.Paste);
+        paste.IsEnabled = CanPasteResources();
+        menu.Items.Add(paste);
         menu.Items.Add(MenuItem(_text["SelectAll"], "ResourceSelectAllMenu", SelectAll_Click, Symbol.SelectAll));
+        AddUndoRedoMenuItems(menu);
         menu.ShowAt(control, new FlyoutShowOptions { Position = position });
+    }
+
+    private void AddUndoRedoMenuItems(MenuFlyout menu)
+    {
+        menu.Items.Add(new MenuFlyoutSeparator());
+        var undo = MenuItem(Label("撤销", "Undo"), "LibraryUndoMenu", Undo_Click, Symbol.Undo);
+        undo.IsEnabled = _library.UndoState.CanUndo;
+        menu.Items.Add(undo);
+        var redo = MenuItem(Label("重做", "Redo"), "LibraryRedoMenu", Redo_Click, Symbol.Redo);
+        redo.IsEnabled = _library.UndoState.CanRedo;
+        menu.Items.Add(redo);
     }
 
     private async Task RenameProjectAsync(string id)
@@ -171,13 +189,68 @@ public sealed partial class MainWindow
 
     private void Navigation_RightTapped(object sender, RightTappedRoutedEventArgs e)
     {
-        if (_vm.IsBusy || _dialogOpen || ItemAtSource(NavigationList, e.OriginalSource) is not NavigationEntry { IsProject: true } project) return;
+        if (_vm.IsBusy || _dialogOpen) return;
+        var entry = ItemAtSource(NavigationList, e.OriginalSource) as NavigationEntry;
         e.Handled = true;
         var menu = new MenuFlyout();
-        menu.Items.Add(MenuItem(_text[project.IsPinned ? "UnpinProject" : "PinProject"], "ProjectPinMenu",
-            async (_, _) => await ToggleProjectPinAsync(project)));
-        menu.Items.Add(MenuItem(_text["RenameProject"], "ProjectRenameMenu", async (_, _) => await RenameProjectAsync(project.Id), Symbol.Edit));
-        menu.Items.Add(MenuItem(_text["DeleteProject"], "ProjectDeleteMenu", async (_, _) => await DeleteProjectAsync(project.Id), Symbol.Delete));
+        if (entry is { IsProject: true } project)
+        {
+            var paste = MenuItem(Label("粘贴", "Paste"), "ProjectPasteMenu", async (_, _) => await PasteResourcesToProjectAsync(project.Id), Symbol.Paste);
+            paste.IsEnabled = CanPasteResources(project.Id);
+            menu.Items.Add(paste);
+            menu.Items.Add(new MenuFlyoutSeparator());
+            menu.Items.Add(MenuItem(_text[project.IsPinned ? "UnpinProject" : "PinProject"], "ProjectPinMenu",
+                async (_, _) => await ToggleProjectPinAsync(project)));
+            menu.Items.Add(MenuItem(_text["RenameProject"], "ProjectRenameMenu", async (_, _) => await RenameProjectAsync(project.Id), Symbol.Edit));
+            var colors = new MenuFlyoutSubItem { Text = _text["ProjectColor"] };
+            AutomationProperties.SetAutomationId(colors, "ProjectColorsMenu");
+            foreach (var color in LocalResourceLibrary.Core.ProjectColors.Presets)
+            {
+                var icon = new FontIcon { Glyph = "\uE8B7", FontSize = 17 };
+                Services.ProjectIconColor.SetKey(icon, color.Key);
+                var item = new ToggleMenuFlyoutItem { Text = Dialogs.ColorLabel(_text, color.Key), IsChecked = project.Color == color.Key, Icon = icon };
+                AutomationProperties.SetAutomationId(item, "ProjectColor_" + color.Key);
+                item.Click += async (_, _) => await ChangeProjectColorAsync(project.Id, color.Key);
+                colors.Items.Add(item);
+            }
+            menu.Items.Add(colors);
+            var groups = new MenuFlyoutSubItem { Text = _text["ProjectGroup"] };
+            AutomationProperties.SetAutomationId(groups, "ProjectGroupsMenu");
+            void AddGroup(string? id, string name)
+            {
+                var item = new ToggleMenuFlyoutItem { Text = name, IsChecked = project.GroupId == id };
+                AutomationProperties.SetAutomationId(item, "ProjectGroup_" + (id ?? "unassigned"));
+                item.Click += async (_, _) => await ChangeProjectGroupAsync(project.Id, id);
+                groups.Items.Add(item);
+            }
+            AddGroup(null, _text["UngroupedProjects"]);
+            foreach (var group in _vm.Snapshot.ProjectGroups ?? []) AddGroup(group.Id, group.Name);
+            menu.Items.Add(groups);
+            menu.Items.Add(MenuItem(_text["ProjectProperties"], "ProjectPropertiesMenu", async (_, _) => await EditProjectPropertiesAsync(project.Id)));
+            menu.Items.Add(new MenuFlyoutSeparator());
+            menu.Items.Add(MenuItem(_text["DeleteProject"], "ProjectDeleteMenu", async (_, _) => await DeleteProjectAsync(project.Id), Symbol.Delete));
+        }
+        else if (entry is { IsGroup: true, GroupId: { } groupId })
+        {
+            menu.Items.Add(MenuItem(_text["NewProject"], "GroupNewProjectMenu", async (_, _) => await NewProjectAsync(groupId)));
+            menu.Items.Add(MenuItem(_text["RenameGroup"], "GroupRenameMenu", async (_, _) => await RenameGroupAsync(groupId), Symbol.Edit));
+            var ordered = (_vm.Snapshot.ProjectGroups ?? []).OrderBy(group => group.SortOrder).ToArray();
+            var index = Array.FindIndex(ordered, group => group.Id == groupId);
+            var up = MenuItem(_text["MoveGroupUp"], "GroupMoveUpMenu", async (_, _) => await MoveGroupAsync(groupId, -1));
+            up.IsEnabled = index > 0;
+            menu.Items.Add(up);
+            var down = MenuItem(_text["MoveGroupDown"], "GroupMoveDownMenu", async (_, _) => await MoveGroupAsync(groupId, 1));
+            down.IsEnabled = index >= 0 && index < ordered.Length - 1;
+            menu.Items.Add(down);
+            menu.Items.Add(new MenuFlyoutSeparator());
+            menu.Items.Add(MenuItem(_text["DeleteGroup"], "GroupDeleteMenu", async (_, _) => await DeleteGroupAsync(groupId), Symbol.Delete));
+        }
+        else
+        {
+            menu.Items.Add(MenuItem(_text["NewProject"], "NavigationNewProjectMenu", async (_, _) => await NewProjectAsync()));
+            menu.Items.Add(MenuItem(_text["NewGroup"], "NavigationNewGroupMenu", async (_, _) => await NewGroupAsync()));
+        }
+        AddUndoRedoMenuItems(menu);
         menu.ShowAt(NavigationList, new FlyoutShowOptions { Position = e.GetPosition(NavigationList) });
     }
 }

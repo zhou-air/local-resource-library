@@ -31,7 +31,7 @@ approval_mode = "prompt"
 args = ['--data-dir', 'E:\MyLibrary', '--allow-batch-commit']
 ```
 
-仅禁用批量提交时，去掉 `--allow-batch-commit`；单条写入仍可使用。只读客户端可以设置 `enabled_tools = ["search_resources", "list_projects", "list_project_resources"]`。`get_resource` 默认会通过文件身份修复索引路径，诚实标记为可写工具；调用 `resolve_path=false` 时不会修复。
+仅禁用批量提交时，去掉 `--allow-batch-commit`；单条写入仍可使用。只读客户端可以设置 `enabled_tools = ["search_resources", "list_projects", "list_project_groups", "list_project_resources"]`。`get_resource` 默认会通过文件身份修复索引路径，诚实标记为可写工具；调用 `resolve_path=false` 时不会修复。
 
 开发时先构建，再让客户端直接启动 DLL（不要把会向 stdout 打印构建日志的 `dotnet run` 配成协议入口）：
 
@@ -52,17 +52,34 @@ dotnet src/LocalResourceLibrary.Mcp/bin/Release/net10.0/LocalResourceLibrary.Mcp
 | --- | --- |
 | `search_resources` | `query` 默认空；可选 `type` 为 `file`、`folder`、`url`；可选 `project_id`；`limit=100`、`offset=0`。复用 Core 本地文本搜索，覆盖真实名称、别名、说明、笔记、路径/URL 和项目名称，多词全部匹配 |
 | `get_resource` | 必需 `item_id`；`resolve_path=true`。返回永久 ID、类型、真实目标、元数据、项目和可用状态；必要时按 Volume ID/File ID 恢复文件索引路径，不打开文件，不增加打开次数 |
-| `list_projects` | 无参数；返回全部项目 ID、名称、说明、置顶和顺序 |
+| `list_projects` | 原无参数调用继续返回 `projects`；每项含永久 ID、名称、说明、颜色、所属 `group_id`、置顶和顺序，同时返回 `project_groups`、`total`、`ambiguous`。可选 `name` 为不区分大小写的名称子串；返回全部候选，多个候选时 `ambiguous=true`。可选 `project_id` 查询稳定 ID、`group_id` 筛选分组或 `ungrouped=true` 筛选未分组；后二者不能同时使用 |
+| `list_project_groups` | 可选 `name` 名称子串、`group_id` 永久 ID；返回 `groups`、`total`、`ambiguous`。分组含 `id`、`name`、`sort_order`、`created_at` |
 | `list_project_resources` | 必需 `project_id`；`limit=100`、`offset=0`；分页获取该项目的所有三类资源 |
 | `add_resource` | 必需 `type`、`target`；可选 `alias`、`description`、`note`、`project_ids`。文件/文件夹须是存在的绝对路径，URL 只允许 HTTP/HTTPS。已有目标复用记录，只增加所选关联，不覆盖原元数据 |
 | `update_resource` | 必需 `item_id`；可选 `alias`、`description`、`note`；至少指定一个字段。未指定或 null 保留，空字符串清空；不改路径、网址或归属 |
-| `create_project` | 必需 `name`；可选 `description`。复用 Core 名称校验与不区分大小写的去重规则；同名时报告冲突，客户端可查询并使用已有项目 |
-| `update_project` | 必需 `project_id`；可选 `name`、`description`，只更新指定字段；资源关联、置顶、顺序保留 |
+| `create_project` | 必需 `name`；可选 `description`、`color="default"`、`group_id`。Core 自动生成永久 UUID；复用名称校验与不区分大小写的去重规则。省略分组时为未分组 |
+| `update_project` | 必需 `project_id`；可选 `name`、`description`、`color`、`group_id`、`clear_group=false`，只更新指定字段；省略/null 保留，`clear_group=true` 移至未分组且不能同时传 `group_id`。项目 ID、资源关联和置顶保留 |
+| `delete_project` | 必需 `project_id`；只删除逻辑项目及其关联，保留资源记录、其他项目关联和原文件；已删除 ID 不再使用 |
+| `move_project` | 必需 `project_id`、`target_project_id`；`after=false` 表示移至目标前，true 表示目标后。未置顶项目采用目标项目分组；独立置顶区内只排序，不改变分组。两个项目须具有相同置顶状态 |
+| `create_project_group` | 必需 `name`；Core 自动生成稳定 UUID，暂不支持嵌套 |
+| `update_project_group` | 必需 `group_id`、`name`；重命名保留分组 ID 和项目 |
+| `delete_project_group` | 必需 `group_id`；只删除分组，将内部项目移至未分组；项目、资源、资源关联、项目颜色与置顶状态保留 |
+| `move_project_group` | 必需 `group_id`、`target_group_id`；`after=false` 表示目标前，true 表示目标后；只改变分组顺序 |
 | `set_resource_projects` | 必需 `item_id`；可选 `add_project_ids`、`remove_project_ids`，至少一条变更；只增减指定关联，保留其他项目。交叠的增减 ID 拒绝，重复 ID 自动去重 |
+| `set_resources_projects` | 必需 `item_ids` 数组（1–1000 条）；可选 `add_project_ids`、`remove_project_ids`，至少一条变更。全批次同一事务，只增减指定项目关联，重复 ID 去重，任何失效 ID 或写入失败均整体回滚 |
+| `copy_resources_to_project` | 必需 `item_ids`、`target_project_id`。将资源引用批量加入目标项目，保留所有原有归属；已有目标关联跳过，不新建重复 Item，不复制真实文件 |
+| `move_resources_to_project` | 必需 `item_ids`、`target_project_id`；可选 `source_project_id`。只解除指定来源项目归属，保留其他归属；省略来源时按「全部资源」处理，只加入目标。同项目移动不产生变更 |
+| `import_resources` | 必需 `targets` 数组（1–1000 条存在的绝对文件/文件夹路径或 HTTP/HTTPS URL）；可选 `project_id`。一事务创建或复用 Item，并加入指定项目；保留已有元数据与归属，任一无效目标整体回滚，不扫描目录、不移动 Explorer 剪切的原文件 |
 | `preview_resource_updates` | 必需 `updates` 数组，每项含 `item_id` 及所需元数据字段，1–100 个不同资源；返回精确前后值、`confirmation_token`、`expires_at`、`commit_enabled`，不写数据库 |
 | `commit_resource_updates` | 必需 `confirmation_token`；仅提交相同进程中预览的内容，需要启动许可和客户端用户确认；所有条目一事务成功或全回滚 |
 
 搜索和项目资源列表返回 `items`、`total`、`limit`、`offset`、`has_more`。`limit` 范围 1–1000；继续请求 `offset + limit`，直到 `has_more=false`。返回结果按 Core 创建时间顺序排列；大量资源分页期间如果有外部新增/删除，客户端应重新查询核对。
+
+批量归属与复制/移动返回稳定 `item_ids`、本次 `added_memberships` 与 `removed_memberships` 数量；批量导入返回 `items`、`added`、`existing` 和 `added_memberships`。这些工具与 WinUI 拖拽和粘贴调用同一套 Core 服务，只管理逻辑关系。目标必须是 Project ID，不能传项目组 ID。WinUI 当前会话中的撤销/重做以数据库实际变更为一个操作单元；MCP 不维护另一套撤销栈。撤销仅回放本次变更，相关行或依赖被 MCP/其他连接更改时拒绝过时撤销并清空历史，保留外部新数据；无关行及未修改字段保持不变。项目关联还记录内部变更版本，外部先移除再添加同一关联时，即使最终归属与旧快照相同，旧撤销仍会被拒绝；同一界面的连续操作、撤销和重做可正常衔接。
+
+项目颜色使用稳定预设键：`default`、`blue`、`teal`、`purple`、`amber`、`cyan`、`rose`、`slate`。WinUI 按深浅主题使用对应颜色，只为项目文件夹线框图标着色；`default` 为兼顾深浅主题的中性预设。MCP 不接受任意颜色或 ID 修改。
+
+项目和分组名称仅用于展示与查找。现有项目 ID 已是稳定 UUID，本次数据库升级直接保留；改名、改色、移动分组不改变 ID，删除后重新创建同名对象会获得新 ID。查询传入的 ID 无效时返回 `not_found`，不会回退到同名项目。原 `create_project(name, description)`、`update_project(project_id, name, description)` 及所有资源工具仍兼容；资源结果中的 `projects` 自动增加 `color`、`group_id` 字段。
 
 资源的 `path` / `url` 只有对应类型有值，`target` 总有值。文件/文件夹的 `available` 为布尔值，`availability` 为 `available` 或 `missing_or_inaccessible`；不区分丢失与访问权限不足。网页 `available=null`、`availability=not_checked`、`is_missing=false`，只表示保存的收藏，**不表示网站在线**。搜索不恢复失效路径；对要阅读的文件调用 `get_resource` 可按已保存身份定位同一卷内的新位置。
 
@@ -71,7 +88,9 @@ dotnet src/LocalResourceLibrary.Mcp/bin/Release/net10.0/LocalResourceLibrary.Mcp
 ## Agent 工作流程
 
 - 查资料：`search_resources({"query":"PDMS Catalogue"})` → 必要时 `get_resource` → Agent 使用自己的文件或网页读取能力分析。
-- 收藏到项目：`list_projects` → 查询或 `create_project` → `add_resource` 并传 `project_ids`。
+- 收藏到项目：`list_projects({"name":"项目名称"})` → 检查全部候选；多个候选时向用户确认目标 → 查询或 `create_project` → `add_resource` 并传永久 `project_ids`。
+- 改名或分组：先查到项目永久 `id` → `update_project({"project_id":"已查询的 ID","name":"新名称","group_id":"已查询的分组 ID"})`；后续继续使用原项目 ID。
+- 新建分组：`create_project_group` → 保存返回的分组 ID → 创建项目时传 `group_id`，或按项目 ID 更新所属分组。
 - 加入另一个项目：`set_resource_projects` 只传 `add_project_ids`，保留原归属。
 - 批量补简介：查询项目的所有分页 → 筛选空简介 → Agent 自行读取资料 → `preview_resource_updates` → 将全部前后变化展示给用户 → 用户确认后调用 `commit_resource_updates`。
 
@@ -87,7 +106,7 @@ WinUI 中点击「刷新资源和状态」或按 F5 可加载 MCP 变更；有�
 
 数据库备份和恢复时必须完全退出 WinUI **以及所有 MCP 客户端/服务器进程**，再复制整个数据目录，含 SQLite 辅助文件。MCP 可独立运行，因此只退出 WinUI 已不足以保证库空闲。
 
-MCP 只管理索引与元数据，不提供删除工具、文件内容读写、真实文件改名/移动、任意命令执行、上传、全盘扫描、网页抓取或 PDF/Word/CAD 解析。无网络监听；程序所有日志写 stderr，stdout 专供 MCP 协议。文件身份恢复只校正数据库路径，不修改真实文件。
+MCP 只管理索引与元数据。项目和分组删除工具只移除逻辑记录，不删除资源记录或原文件；不提供物理文件删除、文件内容读写、真实文件改名/移动、任意命令执行、上传、全盘扫描、网页抓取或 PDF/Word/CAD 解析。无网络监听；程序所有日志写 stderr，stdout 专供 MCP 协议。文件身份恢复只校正数据库路径，不修改真实文件。
 
 标签、语义搜索、AI 分类、自动生成简介、MCP Resources 和复杂关系留给后续扩展。首版未添加这些能力。
 
@@ -100,6 +119,7 @@ dotnet run --project tests/LocalResourceLibrary.ExplorerChecks -c Release
 dotnet run --project tests/LocalResourceLibrary.UrlChecks -c Release
 dotnet run --project tests/LocalResourceLibrary.CoreConcurrencyChecks -c Release
 dotnet run --project tests/LocalResourceLibrary.McpChecks -c Release
+dotnet run --project tests/LocalResourceLibrary.ResourceInteractionChecks -c Release
 ```
 
-检查使用隔离临时数据库和资源，不改个人库。MCP 检查通过真实 stdio 子进程覆盖协议和业务；并发检查使用多个 Core 连接及 MCP 进程，Explorer 检查验证 UI 模型刷新及草稿增量保存。这五组检查自身不等同于真实 WinUI 窗口操作或视觉验收；本次还单独完成了 Codex 自动启动和原生 WinUI/MCP 同时运行功能检查。完整执行结果见 [MCP 功能核验](mcp-verification.md)。
+检查使用隔离临时数据库和资源，不改个人库。MCP 检查通过真实 stdio 子进程覆盖协议和业务；并发检查使用多个 Core 连接及 MCP 进程，Explorer 检查验证 UI 模型刷新及草稿增量保存；ResourceInteraction 检查验证共享归属服务、剪贴板解析及撤销冲突。这些检查自身不等同于真实 WinUI 窗口操作或视觉验收；2026-10-08 的历史核验还单独完成了 Codex 自动启动和原生 WinUI/MCP 同时运行功能检查。本次项目分组与颜色更新的独立结果及历史记录见 [MCP 功能核验](mcp-verification.md)。

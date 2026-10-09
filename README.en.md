@@ -6,6 +6,8 @@ A Windows local resource library built with WinUI 3. Add aliases, descriptions, 
 
 **Files stay where they are.** Adding a file or folder stores its absolute path and, when supported on Windows, its volume identity and File ID, without copying, moving, or storing its contents. URLs use the same Item model and SQLite library, with optional cached website icons. Each item has a permanent Item ID independent of its path. One resource can belong to several logical projects, all referencing the same item. WinUI 3 is the project's only desktop frontend.
 
+Resource marquee selection, batch drag/drop, Copy/Cut/Paste and 100-step session Undo/Redo share the existing Core service. See [resource interactions](docs/resource-interactions.md).
+
 ## AI agents and MCP
 
 The independent `LocalResourceLibrary.Mcp` stdio server lets Codex and other MCP clients search and manage saved files, folders and URLs through the existing Core and SQLite library. WinUI is optional. It supports partial metadata patches, logical projects, multiple memberships, and atomic batch commits after a preview and client confirmation.
@@ -17,8 +19,11 @@ Run `powershell -ExecutionPolicy Bypass -File .\scripts\publish-mcp.ps1`, then a
 - Add files and folders with pickers or drag and drop. An already registered path reuses its existing item.
 - Choose Add resources → Add URL to enter or paste an HTTP/HTTPS URL. Fetch the title, description, and favicon automatically; failed fetching still allows saving. URLs can belong to multiple projects.
 - Keep alias, description, and note separate. The alias is the preferred display name and does not change the actual file name.
-- Create logical projects and select or clear memberships in the details panel. An item can belong to multiple projects.
+- Create logical projects and manage memberships by dragging resources or using Copy, Cut and Paste. An item can belong to multiple projects.
 - Rename a project from its context menu, preserving its description, memberships, and physical resources.
+- Organize projects into flat groups with persisted expansion, independent group ordering, and drag-and-drop project movement. Deleting a group moves its projects to Ungrouped and preserves resources. Pinned projects retain a separate section.
+- Set a project's preset color or group from its context menu or properties. Only the outline folder icon uses the color; names, counts, and selected backgrounds retain the existing theme.
+- Project and group IDs are permanent and read-only. Copy a Project ID from Advanced information in project properties. MCP name lookup returns candidates; project and membership operations use IDs.
 - Keep a notification-area icon from startup. The window close button hides the window; click the icon to restore it, or right-click and choose Exit library to quit.
 - Delete projects or selected resource records using context menus, the toolbar, or `Delete`, preserving original files. Project context menus can also remove just the current membership.
 - Use `Ctrl` for multiple selection, `Shift` for ranges, and `Ctrl+A` to select all. Delete records or copy paths and URLs in batches.
@@ -49,7 +54,7 @@ No account is required. Startup and browsing make no background network requests
 | Give an item a readable name | Edit its alias; the actual file name stays the same |
 | Explain what a resource contains and why it matters | Edit its description |
 | Save temporary or personal information | Edit its note |
-| Add or remove project membership | Select or clear memberships in details, then save |
+| Add or remove project membership | Drag into a project, or copy/cut and paste there; use Remove from project to detach |
 | Open a resource | Double-click it or choose Open in details |
 | Locate it in Explorer | Choose Open location |
 | Get saved paths | Choose Copy path; the context menu copies all selected paths |
@@ -58,7 +63,7 @@ No account is required. Startup and browsing make no background network requests
 | Delete resource records | Use the context menu, Delete resources toolbar button, or `Delete`; originals remain |
 | Remove current memberships | In a project, select resources and choose Remove from project |
 | Delete a project | Use its context menu or select it and use Delete project in the sidebar |
-| Select multiple resources | `Ctrl`-click, `Shift`-click, Select all, or `Ctrl+A` |
+| Select multiple resources | `Ctrl`-click, `Shift`-click, blank-area marquee, or `Ctrl+A` |
 | Check resource availability | Choose Refresh resources and status |
 | Change view or sorting | Use View or Sort; details headers also support sorting |
 | Switch language | Follow the Windows display language automatically; restart the app after changing it |
@@ -85,7 +90,7 @@ The default database is:
 %LOCALAPPDATA%\LocalResourceLibrary\library.db
 ```
 
-The database contains metadata, file identities, URLs, cached website icons, projects, and memberships, without file contents or page bodies. Schema version 1, 2 or 3 databases upgrade automatically to version 4, retaining existing records and memberships. Backing up the library is not a backup of the original files. The UI follows the Windows display language (Chinese for Chinese systems, English otherwise); legacy language choices in `settings.json` are ignored. View, sorting, and pane widths are stored in `explorer-settings.json` in the same directory. Only one WinUI window instance can open a data directory at a time; independent MCP processes can run alongside it using SQLite transactions.
+The database contains metadata, file identities, URLs, cached website icons, projects, groups and memberships, without file contents or page bodies. Schema version 1–4 databases upgrade automatically to version 5, retaining project IDs, existing records, memberships, pinning and order. Legacy projects use the default icon color and Ungrouped. Backing up the library is not a backup of the original files. The UI follows the Windows display language (Chinese for Chinese systems, English otherwise); legacy language choices in `settings.json` are ignored. View, sorting, pane widths and group expansion are stored locally. Only one WinUI window instance can open a data directory at a time; independent MCP processes can run alongside it using SQLite transactions. Upgrade WinUI and MCP together; older binaries reject the newer database schema.
 
 **Fully exit WinUI and all MCP clients/server processes before copying the entire `LocalResourceLibrary` data directory for backup.** Exit those processes before restoring it, too. Moving the library to another computer requires making the resources available at their saved paths; the current UI does not offer path repair.
 
@@ -136,7 +141,7 @@ See the [usage guide (Chinese)](docs/winui-trial.md), [architecture](docs/archit
 
 ## Scope and limitations
 
-The current WinUI frontend does not offer physical-file rename, manual path repair, or project description editing; these interfaces remain in Core. Project rename, project deletion, library-record deletion, multiple selection, and common context-menu actions are available. Deleting resource records removes their memberships in all projects. Deleting a project removes only that project and its memberships. Both preserve original files.
+The current WinUI frontend does not offer physical-file rename or manual path repair; these interfaces remain in Core. Project properties, groups, colors, rename, deletion, library-record deletion, multiple selection, and common context-menu actions are available. Project names and group names each remain unique under their existing case-insensitive rules, but names are only display and lookup values, never permanent identities. Groups cannot be nested. Deleting resource records removes their memberships in all projects. Deleting a project removes only that project and its memberships. Both preserve original files.
 
 WinUI recovery runs when a user opens a physical file; MCP get_resource can also explicitly use the same recovery logic and requires a usable Windows volume identity and File ID. If identity capture is unavailable, normal path-based opening still works; a missing path remains Missing. The app does not scan the file system or use FileSystemWatcher, background monitoring, startup services, or the USN Journal. It does not automatically track folder-item renames or cross-volume moves.
 

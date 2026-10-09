@@ -41,8 +41,33 @@ public sealed class LibraryTools(LibraryService library, ServerOptions options, 
     });
 
     [McpServerTool(Name = "list_projects", ReadOnly = true, Destructive = false, OpenWorld = false)]
-    [Description("List all logical projects with IDs, names, descriptions, pin state and ordering.")]
-    public CallToolResult ListProjects() => Run(() => new { projects = library.GetSnapshot(checkPaths: false).Projects });
+    [Description("List logical projects with permanent IDs, names, descriptions, colors, group IDs, pin state and ordering, plus group metadata. Optional name lookup returns every case-insensitive substring candidate and ambiguous=true for multiple matches. Resolve candidates before using an ID; names never identify mutation targets.")]
+    public CallToolResult ListProjects(
+        [Description("Optional project-name substring; every matching candidate is returned.")] string? name = null,
+        [Description("Optional exact permanent project ID; unknown IDs return not_found.")] string? project_id = null,
+        [Description("Optional exact permanent group ID; unknown IDs return not_found.")] string? group_id = null,
+        [Description("Return only projects without a group. Cannot be combined with group_id.")] bool ungrouped = false) => Run(() =>
+    {
+        var snapshot = library.GetSnapshot(checkPaths: false);
+        if (project_id != null) RequireProject(snapshot, project_id);
+        if (group_id != null) RequireGroup(snapshot, group_id);
+        if (ungrouped && group_id != null) throw new ArgumentException("Use group_id or ungrouped, not both.");
+        var projects = snapshot.Projects.Where(project =>
+            (project_id == null || project.Id == project_id) &&
+            (group_id == null || project.GroupId == group_id) &&
+            (!ungrouped || project.GroupId == null) && NameMatches(project.Name, name)).ToArray();
+        return new { projects, project_groups = Groups(snapshot), total = projects.Length, ambiguous = name != null && projects.Length > 1 };
+    });
+
+    [McpServerTool(Name = "list_project_groups", ReadOnly = true, Destructive = false, OpenWorld = false)]
+    [Description("List project groups with permanent IDs, names, order and creation time. Optional name lookup returns every case-insensitive substring candidate. Groups are one level; projects can be ungrouped.")]
+    public CallToolResult ListProjectGroups(string? name = null, string? group_id = null) => Run(() =>
+    {
+        var snapshot = library.GetSnapshot(checkPaths: false);
+        if (group_id != null) RequireGroup(snapshot, group_id);
+        var groups = Groups(snapshot).Where(group => (group_id == null || group.Id == group_id) && NameMatches(group.Name, name)).ToArray();
+        return new { groups, total = groups.Length, ambiguous = name != null && groups.Length > 1 };
+    });
 
     [McpServerTool(Name = "list_project_resources", ReadOnly = true, Destructive = false, OpenWorld = false)]
     [Description("List every saved resource in a logical project using pages. Continue with offset until has_more is false.")]
@@ -76,16 +101,73 @@ public sealed class LibraryTools(LibraryService library, ServerOptions options, 
     });
 
     [McpServerTool(Name = "create_project", ReadOnly = false, Destructive = false, OpenWorld = false)]
-    [Description("Create a logical project. Project names are unique using Core's case-insensitive rule; this does not create a physical folder.")]
-    public CallToolResult CreateProject(string name, string description = "") => Run(() => new { project = library.CreateProject(name, description) });
+    [Description("Create a logical project with an automatically generated permanent UUID. Names are unique using Core's case-insensitive rule. Optionally select a preset color and an existing group ID. Does not create a physical folder; IDs cannot be supplied or changed.")]
+    public CallToolResult CreateProject(string name, string description = "",
+        [Description("Preset key: default, blue, teal, purple, amber, cyan, rose or slate.")] string color = "default",
+        [Description("Existing permanent group ID; omitted creates an ungrouped project.")] string? group_id = null) =>
+        Run(() => new { project = library.CreateProject(name, description, color, group_id) });
 
     [McpServerTool(Name = "update_project", ReadOnly = false, Destructive = false, OpenWorld = false)]
-    [Description("Patch supplied project name and/or description, preserving resources, associations, pin state and order. Omit fields to preserve; an empty description clears it.")]
-    public CallToolResult UpdateProject(string project_id, string? name = null, string? description = null) => Run(() =>
+    [Description("Patch supplied project fields using only its permanent ID. Name, color and group changes preserve that ID and resource memberships. Omit fields to preserve; an empty description clears it. Set clear_group=true to move to ungrouped. Unknown/stale IDs fail without name fallback; IDs are read-only.")]
+    public CallToolResult UpdateProject(string project_id, string? name = null, string? description = null,
+        [Description("Preset key: default, blue, teal, purple, amber, cyan, rose or slate.")] string? color = null,
+        [Description("Existing permanent group ID; null preserves the current group.")] string? group_id = null,
+        [Description("Move to ungrouped; cannot be combined with group_id.")] bool clear_group = false) => Run(() =>
     {
         RequireId(project_id);
-        if (name == null && description == null) throw new ArgumentException("Specify name or description to update.");
-        return new { project = library.PatchProject(project_id, name, description) };
+        if (name == null && description == null && color == null && group_id == null && !clear_group)
+            throw new ArgumentException("Specify at least one project field to update.");
+        return new { project = library.PatchProject(project_id, name, description, color: color, groupId: group_id, clearGroup: clear_group) };
+    });
+
+    [McpServerTool(Name = "delete_project", ReadOnly = false, Destructive = true, OpenWorld = false)]
+    [Description("Delete a logical project by permanent ID and remove only its resource memberships. Resources, original files and other project memberships remain. Deleted IDs are never reused. Unknown/stale IDs fail without name fallback.")]
+    public CallToolResult DeleteProject(string project_id) => Run(() =>
+    {
+        RequireProject(library.GetSnapshot(checkPaths: false), project_id);
+        library.DeleteProject(project_id);
+        return new { deleted = true, project_id };
+    });
+
+    [McpServerTool(Name = "move_project", ReadOnly = false, Destructive = false, OpenWorld = false)]
+    [Description("Order a project before/after another project using permanent IDs. Unpinned projects move into the target's group; pinned projects sort in the independent pinned area. Pin state never changes; source and target must have the same pin state. Use update_project to move group without changing pin state.")]
+    public CallToolResult MoveProject(string project_id, string target_project_id, bool after = false) => Run(() =>
+    {
+        RequireId(project_id);
+        RequireId(target_project_id);
+        library.MoveProject(project_id, target_project_id, after);
+        return new { project = library.GetProject(project_id) };
+    });
+
+    [McpServerTool(Name = "create_project_group", ReadOnly = false, Destructive = false, OpenWorld = false)]
+    [Description("Create a single-level project group with an automatically generated permanent UUID. Does not create a physical folder; IDs cannot be supplied or changed.")]
+    public CallToolResult CreateProjectGroup(string name) => Run(() => new { group = library.CreateProjectGroup(name) });
+
+    [McpServerTool(Name = "update_project_group", ReadOnly = false, Destructive = false, OpenWorld = false)]
+    [Description("Rename a group by permanent ID, preserving its ID, projects and order. Unknown/stale IDs fail without name fallback; Group IDs are read-only.")]
+    public CallToolResult UpdateProjectGroup(string group_id, string name) => Run(() =>
+    {
+        RequireId(group_id);
+        return new { group = library.PatchProjectGroup(group_id, name) };
+    });
+
+    [McpServerTool(Name = "delete_project_group", ReadOnly = false, Destructive = true, OpenWorld = false)]
+    [Description("Delete a group by permanent ID. Its projects move to ungrouped, preserving their IDs, colors, pin state and all resource memberships. Resources and original files remain; unknown/stale IDs fail without name fallback.")]
+    public CallToolResult DeleteProjectGroup(string group_id) => Run(() =>
+    {
+        RequireGroup(library.GetSnapshot(checkPaths: false), group_id);
+        library.DeleteProjectGroup(group_id);
+        return new { deleted = true, group_id };
+    });
+
+    [McpServerTool(Name = "move_project_group", ReadOnly = false, Destructive = false, OpenWorld = false)]
+    [Description("Order a group before/after another group using permanent IDs. Does not change group IDs, project groups, pin state or resource memberships.")]
+    public CallToolResult MoveProjectGroup(string group_id, string target_group_id, bool after = false) => Run(() =>
+    {
+        RequireId(group_id);
+        RequireId(target_group_id);
+        library.MoveProjectGroup(group_id, target_group_id, after);
+        return new { groups = Groups(library.GetSnapshot(checkPaths: false)) };
     });
 
     [McpServerTool(Name = "set_resource_projects", ReadOnly = false, Destructive = false, OpenWorld = false)]
@@ -96,6 +178,45 @@ public sealed class LibraryTools(LibraryService library, ServerOptions options, 
         if ((add_project_ids?.Length ?? 0) + (remove_project_ids?.Length ?? 0) == 0)
             throw new ArgumentException("Specify at least one project ID to add or remove.");
         return new { item = ResourceDto.From(library.ChangeResourceProjects(item_id, add_project_ids, remove_project_ids)) };
+    });
+
+    [McpServerTool(Name = "set_resources_projects", ReadOnly = false, Destructive = false, OpenWorld = false)]
+    [Description("Atomically add/remove the named project memberships for 1 to 1000 permanent Item IDs. Preserves every other membership, resource record and physical target. Unknown IDs or failed writes roll back the entire batch; duplicates are ignored.")]
+    public CallToolResult SetResourcesProjects(string[] item_ids, string[]? add_project_ids = null, string[]? remove_project_ids = null) => Run(() =>
+    {
+        ValidateResourceBatch(item_ids);
+        if ((add_project_ids?.Length ?? 0) + (remove_project_ids?.Length ?? 0) == 0)
+            throw new ArgumentException("Specify at least one project ID to add or remove.");
+        return library.ChangeResourceProjectsBatch(item_ids, add_project_ids, remove_project_ids);
+    });
+
+    [McpServerTool(Name = "copy_resources_to_project", ReadOnly = false, Destructive = false, OpenWorld = false)]
+    [Description("Copy 1 to 1000 resource references into a project by permanent Item IDs and Project ID in one transaction. Existing target memberships are skipped; all original memberships and Item/File IDs remain. Never copies or modifies real files or folders.")]
+    public CallToolResult CopyResourcesToProject(string[] item_ids, string target_project_id) => Run(() =>
+    {
+        ValidateResourceBatch(item_ids);
+        RequireId(target_project_id);
+        return library.TransferResources(item_ids, target_project_id);
+    });
+
+    [McpServerTool(Name = "move_resources_to_project", ReadOnly = false, Destructive = false, OpenWorld = false)]
+    [Description("Atomically move 1 to 1000 resource references from source_project_id to target_project_id using permanent IDs. Only the named source membership is removed; other projects and original files remain. Omit source_project_id for All Resources: adds the target and preserves every existing membership. Moving to the same project changes nothing.")]
+    public CallToolResult MoveResourcesToProject(string[] item_ids, string target_project_id, string? source_project_id = null) => Run(() =>
+    {
+        ValidateResourceBatch(item_ids);
+        RequireId(target_project_id);
+        if (source_project_id != null) RequireId(source_project_id);
+        return library.TransferResources(item_ids, target_project_id, source_project_id, move: true);
+    });
+
+    [McpServerTool(Name = "import_resources", ReadOnly = false, Destructive = false, OpenWorld = false)]
+    [Description("Import 1 to 1000 existing absolute file/folder paths and HTTP/HTTPS URLs as references in one Core transaction, optionally into a project identified by project_id. Reuses existing Items without replacing metadata, identity or memberships. No folder scan, network fetch or filesystem copy/move/delete, even for Explorer cut paths. Invalid targets roll back the whole batch.")]
+    public CallToolResult ImportResources(string[] targets, string? project_id = null) => Run(() =>
+    {
+        ValidateResourceBatch(targets);
+        if (project_id != null) RequireId(project_id);
+        var result = library.ImportReferences(targets, project_id);
+        return new { items = result.Items.Select(ResourceDto.From).ToArray(), result.Added, result.Existing, result.AddedMemberships };
     });
 
     [McpServerTool(Name = "preview_resource_updates", ReadOnly = true, Destructive = false, OpenWorld = false)]
@@ -172,11 +293,29 @@ public sealed class LibraryTools(LibraryService library, ServerOptions options, 
 
     private static void RequireId(string id) => ArgumentException.ThrowIfNullOrWhiteSpace(id);
 
+    private static void ValidateResourceBatch(string[] values)
+    {
+        ArgumentNullException.ThrowIfNull(values);
+        if (values.Length is < 1 or > 1000) throw new ArgumentException("A resource batch must contain 1 to 1000 entries.");
+        if (values.Any(string.IsNullOrWhiteSpace)) throw new ArgumentException("Resource batch entries cannot be blank.");
+    }
+
     private static void RequireProject(LibrarySnapshot snapshot, string id)
     {
         RequireId(id);
         if (!snapshot.Projects.Any(project => project.Id == id)) throw new KeyNotFoundException("Project does not exist.");
     }
+
+    private static IReadOnlyList<ProjectGroup> Groups(LibrarySnapshot snapshot) => snapshot.ProjectGroups ?? [];
+
+    private static void RequireGroup(LibrarySnapshot snapshot, string id)
+    {
+        RequireId(id);
+        if (!Groups(snapshot).Any(group => group.Id == id)) throw new KeyNotFoundException("Project group does not exist.");
+    }
+
+    private static bool NameMatches(string name, string? lookup) => lookup == null ||
+        name.Contains(lookup.Trim(), StringComparison.OrdinalIgnoreCase);
 
     private static void ValidatePatch(ResourceMetadataPatch patch)
     {

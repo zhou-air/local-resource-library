@@ -12,6 +12,7 @@ public sealed record ExplorerPreferences
     public ResourceSortKey SortKey { get; init; } = ResourceSortKey.Name;
     public bool SortDescending { get; init; }
     public bool FoldersFirst { get; init; } = true;
+    public string[] CollapsedGroupIds { get; init; } = [];
 }
 
 /// <summary>The WinUI Explorer options are independent of the shared language settings.</summary>
@@ -38,7 +39,8 @@ public sealed class ExplorerPreferencesStore
                     NavigationWidth = ValidWidth(saved.NavigationWidth, 226, 160, 480),
                     DetailsWidth = ValidWidth(saved.DetailsWidth, 340, 280, 620),
                     ViewMode = Enum.IsDefined(saved.ViewMode) ? saved.ViewMode : ResourceViewMode.Details,
-                    SortKey = Enum.IsDefined(saved.SortKey) ? saved.SortKey : ResourceSortKey.Name
+                    SortKey = Enum.IsDefined(saved.SortKey) ? saved.SortKey : ResourceSortKey.Name,
+                    CollapsedGroupIds = (saved.CollapsedGroupIds ?? []).Where(id => !string.IsNullOrWhiteSpace(id)).Distinct(StringComparer.Ordinal).ToArray()
                 };
         }
         catch (Exception exception) when (exception is IOException or JsonException or UnauthorizedAccessException or NotSupportedException) { }

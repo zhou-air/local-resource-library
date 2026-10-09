@@ -6,7 +6,9 @@ Run on Windows with the .NET 10 SDK from the repository root:
 dotnet run --project tests/LocalResourceLibrary.Checks/LocalResourceLibrary.Checks.csproj -c Release
 ```
 
-The console runner returns exit code `0` only when all 42 scenarios pass. Every scenario uses its own temporary SQLite database and temporary files. Cleanup is restricted to that scenario's generated temporary directory.
+The console runner returns exit code `0` only when all 58 scenarios pass. Every scenario uses its own temporary SQLite database and temporary files. Cleanup is restricted to that scenario's generated temporary directory.
+
+Project organization checks include real schema 1/3/4 migration to schema 5, migration rollback, stable UUIDs and ID immutability, group lifecycle and deletion without resource loss, theme palette bounds, independent pinned ordering, cross-group moves and atomic failure handling.
 
 Coverage includes reference-only imports; canonical Windows paths; many-to-many projects; separate alias, description and note; all six search fields; database reopening; missing paths; safe rename and repair; descendant references; logical removal; atomic batch record/membership deletion, preservation of original files and unrelated memberships, and rollback after injected deletion failures; shell dispatch history; and rollback after injected SQLite and filesystem failures.
 

@@ -1,6 +1,9 @@
 namespace LocalResourceLibrary.Core;
 
-public record Project(string Id, string Name, string Description, bool IsPinned = false, long SortOrder = 0);
+public record Project(string Id, string Name, string Description, bool IsPinned = false, long SortOrder = 0,
+    string Color = "default", string? GroupId = null);
+
+public record ProjectGroup(string Id, string Name, long SortOrder, DateTimeOffset CreatedAt);
 
 public record ResourceItem(
     string Id,
@@ -24,6 +27,7 @@ public record ResourceItem(
     public string DisplayName => string.IsNullOrWhiteSpace(Alias) ? RealName : Alias;
 }
 
-public record LibrarySnapshot(IReadOnlyList<ResourceItem> Items, IReadOnlyList<Project> Projects);
+public record LibrarySnapshot(IReadOnlyList<ResourceItem> Items, IReadOnlyList<Project> Projects,
+    IReadOnlyList<ProjectGroup>? ProjectGroups = null);
 public record AddResourcesResult(int Added, int Existing, IReadOnlyList<string> Errors);
 public record AddUrlResult(ResourceItem Item, bool Added);

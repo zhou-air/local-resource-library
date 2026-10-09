@@ -61,6 +61,8 @@ public sealed partial class MainWindow : Window
         };
         _rendering = false;
         InitializeExplorer();
+        InitializeResourceSelection();
+        InitializeResourceInteractions();
         var iconPath = System.IO.Path.Combine(AppContext.BaseDirectory, "Assets", "Library.ico");
         AppWindow.SetIcon(iconPath);
         _tray = new TrayIcon(instanceKey, iconPath, text["Title"], text["OpenLibrary"], text["ExitLibrary"]);
@@ -96,6 +98,8 @@ public sealed partial class MainWindow : Window
             var selected = _vm.Selected;
             _detailsOpen = selected != null && (selected.Id != previousId || detailsWereOpen);
             ApplyPresentation();
+            RefreshCutAppearance();
+            UpdateInteractionCommands();
         }
         finally { _rendering = false; }
     }
@@ -209,7 +213,7 @@ public sealed partial class MainWindow : Window
             await ShowErrorAsync(exception);
             return false;
         }
-        finally { _vm.IsBusy = false; }
+        finally { _vm.IsBusy = false; UpdateInteractionCommands(); }
     }
 
     private async Task ShowErrorAsync(Exception exception)
@@ -224,13 +228,15 @@ public sealed partial class MainWindow : Window
     private async void Resource_Changed(object sender, SelectionChangedEventArgs e)
     {
         if (_rendering) return;
-        await ChangeResourceSelectionAsync(((ListViewBase)sender).SelectedItems.OfType<ResourceRow>().Select(row => row.Id).ToArray());
+        await HandleResourceSelectionChangedAsync((ListViewBase)sender);
     }
 
     private async void Navigation_Changed(object sender, SelectionChangedEventArgs args)
     {
         if (_rendering) return;
         var navigation = NavigationList.SelectedItem as NavigationEntry;
+        // Up/Down may focus a header on its way to a project. Expansion is an explicit tap or key action.
+        if (navigation is { IsHeader: true }) return;
         if (navigation == null || navigation.Id == _vm.NavigationId) return;
         if (!await EnsureEditsAsync())
         {
@@ -239,8 +245,7 @@ public sealed partial class MainWindow : Window
             _rendering = false;
             return;
         }
-        _vm.NavigationId = navigation.Id;
-        Render(_vm.Snapshot, null);
+        if (_vm.TrySetNavigation(navigation)) Render(_vm.Snapshot, null);
     }
 
     private void Search_Changed(object sender, TextChangedEventArgs e)
@@ -341,14 +346,6 @@ public sealed partial class MainWindow : Window
         SelectAliasName();
     }
 
-    private void EditMemberships_Click(object sender, RoutedEventArgs e)
-    {
-        if (!_vm.HasSingleSelection) return;
-        _detailsOpen = true;
-        UpdatePaneWidths();
-        MembershipSection.StartBringIntoView();
-    }
-
     private async void AddFile_Click(object sender, RoutedEventArgs e)
     {
         if (!await EnsureEditsAsync()) return;
@@ -379,52 +376,31 @@ public sealed partial class MainWindow : Window
 
     private async Task AddPathsAsync(IEnumerable<string> paths)
     {
-        AddResourcesResult? result = null;
-        var projectId = _vm.CurrentProjectId;
-        var values = paths.ToArray();
-        if (!await RunAsync(() => result = _library.AddPaths(values, projectId)) || result == null) return;
-        _vm.Status = _text.Format("AddResult", result.Added, result.Existing);
-        if (result.Errors.Count > 0)
-        {
-            _dialogOpen = true;
-            try { await Dialogs.MessageAsync(Root, _text, _text["AddErrors"], string.Join("\n", result.Errors.Take(12).Select(error => ErrorText.FormatMessage(error, _text)))); }
-            finally { _dialogOpen = false; }
-        }
+        await ImportReferencesAsync(paths.ToArray(), _vm.CurrentProjectId);
     }
 
     private void Root_DragOver(object sender, DragEventArgs e)
     {
-        e.AcceptedOperation = !_vm.IsBusy && e.DataView.Contains(StandardDataFormats.StorageItems) ? DataPackageOperation.Link : DataPackageOperation.None;
+        e.AcceptedOperation = !_vm.IsBusy && !_dialogOpen && HasResourceData(e.DataView) &&
+            !e.DataView.Contains(ProjectDragFormat) ? DataPackageOperation.Copy : DataPackageOperation.None;
         e.Handled = true;
     }
 
     private async void Root_Drop(object sender, DragEventArgs e)
     {
         e.Handled = true;
-        if (_vm.IsBusy || !e.DataView.Contains(StandardDataFormats.StorageItems) || !await EnsureEditsAsync()) return;
+        if (_vm.IsBusy || !HasResourceData(e.DataView) || e.DataView.Contains(ProjectDragFormat)) return;
+        var deferral = e.GetDeferral();
         try
         {
-            var items = await e.DataView.GetStorageItemsAsync();
-            await AddPathsAsync(items.Select(item => item.Path).Where(path => !string.IsNullOrWhiteSpace(path)));
+            e.AcceptedOperation = DataPackageOperation.Copy;
+            await PasteDataAsync(e.DataView, _vm.CurrentProjectId, fromDrag: true, move: IsShiftDrag(e));
         }
         catch (Exception exception) { await ShowErrorAsync(exception); }
+        finally { deferral.Complete(); }
     }
 
-    private async void NewProject_Click(object sender, RoutedEventArgs e)
-    {
-        if (!await EnsureEditsAsync()) return;
-        _dialogOpen = true;
-        (string Value, string Description)? result;
-        try { result = await Dialogs.InputAsync(Root, _text, _text["NewProject"], _text["ProjectName"], "", description: ""); }
-        finally { _dialogOpen = false; }
-        if (result == null) return;
-        Project? project = null;
-        if (await RunAsync(() => project = _library.CreateProject(result.Value.Value, result.Value.Description)) && project != null)
-        {
-            _vm.NavigationId = project.Id;
-            Render(_vm.Snapshot, null);
-        }
-    }
+    private async void NewProject_Click(SplitButton sender, SplitButtonClickEventArgs e) => await NewProjectAsync();
 
     private async void Open_Click(object sender, RoutedEventArgs e)
     {
@@ -471,8 +447,13 @@ public sealed partial class MainWindow : Window
         if (control && e.Key == VirtualKey.F) { SearchBox.Focus(FocusState.Keyboard); SearchBox.SelectAll(); e.Handled = true; }
         else if (control && e.Key == VirtualKey.S) { Save_Click(sender, e); e.Handled = true; }
         else if (e.Key == VirtualKey.F5) { Refresh_Click(sender, e); e.Handled = true; }
-        else if (e.Key == VirtualKey.Escape && _vm.HasSelection) { ClearSelectionAsync(); e.Handled = true; }
-        else if (control && e.Key == VirtualKey.A && IsResourceFocus()) { SelectAll_Click(sender, e); e.Handled = true; }
+        else if (e.Key == VirtualKey.Escape) { CancelResourceMarquee(); CancelCutResources(); if (_vm.HasSelection) ClearSelectionAsync(); e.Handled = true; }
+        else if (control && !IsTextEditingFocus() && e.Key == VirtualKey.C && _vm.HasSelection) { CopyResources_Click(sender, e); e.Handled = true; }
+        else if (control && !IsTextEditingFocus() && e.Key == VirtualKey.X && _vm.HasSelection) { CutResources_Click(sender, e); e.Handled = true; }
+        else if (control && !IsTextEditingFocus() && e.Key == VirtualKey.V) { PasteResources_Click(sender, e); e.Handled = true; }
+        else if (control && !IsTextEditingFocus() && e.Key == VirtualKey.Z) { Undo_Click(sender, e); e.Handled = true; }
+        else if (control && !IsTextEditingFocus() && e.Key == VirtualKey.Y) { Redo_Click(sender, e); e.Handled = true; }
+        else if (control && e.Key == VirtualKey.A && !IsTextEditingFocus()) { SelectAll_Click(sender, e); e.Handled = true; }
         else if (e.Key == VirtualKey.Delete && IsResourceFocus()) { DeleteResources_Click(sender, e); e.Handled = true; }
         else if (e.Key == VirtualKey.Enter && IsResourceFocus()) { Open_Click(sender, e); e.Handled = true; }
         else if (e.Key == VirtualKey.F2 && IsResourceFocus() && _vm.HasSingleSelection) { _detailsOpen = true; UpdatePaneWidths(); AliasBox.Focus(FocusState.Keyboard); SelectAliasName(); e.Handled = true; }

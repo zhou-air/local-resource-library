@@ -13,5 +13,6 @@
     <Project Path="tests/LocalResourceLibrary.UrlChecks/LocalResourceLibrary.UrlChecks.csproj" />
     <Project Path="tests/LocalResourceLibrary.CoreConcurrencyChecks/LocalResourceLibrary.CoreConcurrencyChecks.csproj" />
     <Project Path="tests/LocalResourceLibrary.McpChecks/LocalResourceLibrary.McpChecks.csproj" />
+    <Project Path="tests/LocalResourceLibrary.ResourceInteractionChecks/LocalResourceLibrary.ResourceInteractionChecks.csproj" />
   </Folder>
 </Solution>

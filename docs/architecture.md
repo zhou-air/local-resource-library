@@ -3,12 +3,12 @@
 ## Resource identity
 
 ```text
-File / Folder / URL → Item ↔ ProjectItem ↔ Project
+File / Folder / URL → Item ↔ ProjectItem ↔ Project → ProjectGroup (optional)
 ```
 
 The file system or website owns the actual resource. `Item` owns its logical context. `ProjectItem` stores memberships, so adding an item to another project does not duplicate its metadata or physical contents.
 
-`Item` carries a permanent Item ID, a type (`file`, `folder`, or `url`), an absolute target path or HTTP/HTTPS URL, alias, description, note, timestamps, and open count. Physical files also carry a Windows volume GUID and File ID when available; URLs can carry a cached favicon BLOB. Item ID is independent of the target; the file identity is used only to identify and recover the physical file. Alias is independent of the actual file name or URL. `Project` carries a name and description. The existing SQLite database persists all three types and their shared memberships.
+`Item` carries a permanent Item ID, a type (`file`, `folder`, or `url`), an absolute target path or HTTP/HTTPS URL, alias, description, note, timestamps, and open count. Physical files also carry a Windows volume GUID and File ID when available; URLs can carry a cached favicon BLOB. Item ID is independent of the target; the file identity is used only to identify and recover the physical file. Alias is independent of the actual file name or URL. `Project` retains its existing UUID ID, name, description, pinned state and order, and adds a color preset key and optional group ID. `ProjectGroup` has its own UUID ID, name, order and creation time. The existing SQLite database persists these records and shared memberships.
 
 ## Project layout
 
@@ -25,7 +25,7 @@ The file system or website owns the actual resource. `Item` owns its logical con
 | `tests/LocalResourceLibrary.CoreConcurrencyChecks` | Isolated concurrent startup/migration, partial patches, membership deltas, batch rollback and UI edit conflicts |
 | `tests/LocalResourceLibrary.McpChecks` | Real stdio client/server integration including three types, protocol discovery, permissions, batches, concurrent clients and file identity recovery |
 | `scripts/publish-mcp.ps1` | Standalone self-contained MCP output under artifacts, with actual-path Codex configuration and dependency notices |
-| `LocalResourceLibrary.WinUI.slnx` | Solution containing WinUI, Core, MCP and all five check projects |
+| `LocalResourceLibrary.WinUI.slnx` | Solution containing WinUI, Core, MCP and all six check projects |
 
 The UI invokes Core operations rather than embedding database statements in event handlers. `ISearchProvider` separates text search; `IResourcePlatform` separates Windows file and shell operations so checks can substitute a platform adapter. Neither extension changes item identity or membership.
 
@@ -34,8 +34,11 @@ The WinUI project owns its localization, settings, and error-formatting code. Th
 ## Operations exposed by the UI
 
 - **Add:** register an absolute path or URL, capture physical-file identity when available, reuse an already registered item, and optionally add memberships. Adding an existing URL only adds selected memberships and never replaces its metadata or favicon.
-- **Edit details:** update alias, description, note, and selected memberships; URLs also expose the complete editable target. The URL context menu opens the same native edit dialog. Alias changes metadata only.
-- **Create project:** create a logical collection with a name and description.
+- **Edit details:** update alias, description, and note; URLs also expose the complete editable target. The URL context menu opens the same native edit dialog. Alias changes metadata only.
+- **Create project:** create a logical collection with an automatically generated permanent ID, name, description, preset color and optional group. Properties expose the ID only in advanced read-only information with a copy command.
+- **Organize projects:** flat groups have neutral headers and remembered expansion. Pinned projects occupy their own section; unpinned projects sort within their group or Ungrouped. Moving a project to a group preserves its pinned state. Group order is independent of project order. Project and group names keep their respective case-insensitive uniqueness rules; neither name is an identity.
+- **Delete group:** move its projects to Ungrouped in one transaction, retaining projects, resources and memberships.
+- **Project colors:** Core validates stable preset keys. WinUI resolves light/dark variants only for the existing outline folder glyph. Project names, counts, system icons and selected backgrounds keep the original theme styling.
 - **Delete project:** remove that project and its memberships, preserving all resource records and physical files.
 - **Delete resource records:** delete one or more items and their memberships in a single SQLite transaction, preserving physical files.
 - **Multiple selection:** native extended selection in both ListView and GridView; type-specific right-click commands, select all, and batch path/URL copying. Single-resource editing is hidden for multiple selection.
@@ -68,7 +71,6 @@ Core retains the following interfaces and checks, but the current WinUI window d
 
 - **Physical rename:** rename the resource while preserving item identity, metadata, and memberships. Folder renaming rebases registered descendant paths. File-system and database writes are separate; on metadata-write failure, the operation attempts to restore the original disk name.
 - **Repair path:** update the saved reference to an existing user-selected resource without replacing its context.
-- **Edit project description:** update the optional project description. The UI exposes name-only project renaming through the navigation context menu, preserving the existing description and memberships.
 
 These are core capabilities rather than user-facing features. Project membership can be removed by clearing its checkbox and saving, or with the batch context-menu command.
 
@@ -76,9 +78,9 @@ These are core capabilities rather than user-facing features. Project membership
 
 Default data lives below `%LOCALAPPDATA%\LocalResourceLibrary`. `--data-dir PATH` redirects the application to a separate local library. The SQLite file is `library.db`.
 
-SQLite schema version 4 retains Item's `url` type and nullable favicon BLOB and adds Project's `is_pinned` and `sort_order` fields, preserving physical-resource rows, identity fields, metadata, and memberships. Version 1, 2 and 3 databases migrate automatically; existing projects start unpinned in their prior alphabetical order. New projects append to the normal group; pinning or unpinning appends to the destination group. Reordering is transactional and restricted to the same pinned state. Version 2's nullable file-identity fields retain their behavior; identities are backfilled lazily when an existing physical file is accessible. No separate URL database is created.
+SQLite schema version 5 adds `ProjectGroup`, Project's `color` preset key and nullable `group_id` foreign key with `ON DELETE SET NULL`. Existing Item, ProjectItem, Project IDs, metadata, file identities, pinned state and order remain intact. Version 1–4 databases migrate automatically inside the existing serialized migration transaction; legacy projects use the default color and Ungrouped. Project and Group ID update triggers reject ID changes. New projects append to their destination section; pin/unpin appends to the corresponding section. Unpinned row reordering can adopt another row's group; pinned reordering stays within the independent pinned section. Group moves preserve pin state. Version 2's file-identity fields retain their lazy backfill behavior. No separate resource database is created. Upgrade WinUI and MCP together; older binaries reject schema 5 rather than writing an unsupported structure.
 
-Language follows the Windows display language at startup: Chinese for Chinese cultures, English otherwise. Legacy `settings.json` language choices are ignored. View mode, sorting, and pane widths are saved in `explorer-settings.json`. Metadata remains as entered; changing language does not translate names, notes, descriptions, aliases, or paths. Startup does not restore a resource selection, so details start collapsed.
+Language follows the Windows display language at startup: Chinese for Chinese cultures, English otherwise. Legacy `settings.json` language choices are ignored. View mode, sorting, pane widths and group expansion by stable Group ID are saved in `explorer-settings.json`. Metadata remains as entered; changing language does not translate names, notes, descriptions, aliases, or paths. Startup does not restore a resource selection, so details start collapsed.
 
 A mutex limits WinUI to one window instance per data directory in a Windows session. MCP processes do not acquire this window lock and may run independently or alongside WinUI. This is a single-user, local library, not a multi-machine shared database. Make backups after fully closing WinUI and every MCP client/server process, copying the whole data directory.
 
@@ -97,3 +99,7 @@ The application registers a native notification-area icon at startup. A hidden t
 ## Outside the current scope
 
 No content indexing, document parsing, content previews, AI, embeddings, tags, accounts, cloud sync, browser extension, browser-bookmark import, global shortcut window, automatic classification, or background network service. Future additions must respect the registered library's scope. Functional checks do not constitute native UI or visual acceptance.
+
+## Resource interactions and session history
+
+WinUI sends stable Item ID batches to Core for logical copy/move and membership changes. External clipboard paths and URLs use one atomic ImportReferences transaction. Session history is opt-in on the UI service, bounded to 100 commands, and stores logical row deltas including parent/dependency restoration; MCP uses the same mutation APIs without a separate history stack. Undo/redo checks conflicts before restoring and never performs file-system actions. ResourceInteractionChecks covers batch rollback, identity, multi-project membership, clipboard parsing and history safety.
